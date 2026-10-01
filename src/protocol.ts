@@ -255,26 +255,6 @@ export function parseAgentFile(data: Buffer, expected?: Pick<WireMessage, 'id' |
 // Writes an agent file with the fixed format: two-space JSON and one trailing LF.
 export const writeAgentFile = (request: AgentRequest) => Buffer.from(`${JSON.stringify(request, null, 2)}\n`, 'utf8');
 
-// ---- legacy Taskboard messages ----
-
-// Taskboard sent `[Taskboard message v1]` or `[Taskboard message v2]` followed by JSON. The package reads them during
-// the switch so that no message that the old receiver accepted is lost. Legacy messages have audience person.
-export function decodeLegacyTaskboard(text: unknown): { id: string; subject: string; body: string; files?: { id: string; name: string; size: number; hash: string; longBody?: boolean }[] } | null {
-  if (typeof text !== 'string' || bytes(text) > MAX_TEXT_BYTES) return null;
-  if (!text.startsWith('Taskboard message: ') && !text.startsWith('[Taskboard message v')) return null;
-  for (const match of text.matchAll(/\[Taskboard message v([12])\]\s+(?=\{)/g)) {
-    try {
-      const hasFiles = match[1] === '2';
-      const m = JSON.parse(text.slice(match.index! + match[0].length));
-      if (typeof m.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(m.id) || typeof m.subject !== 'string' || typeof m.body !== 'string') continue;
-      if (hasFiles && (!Array.isArray(m.files) || m.files.length < 1 || m.files.length > 5 || m.files.some((f: any) => !/^F[A-Z0-9]+$/.test(f.id) || typeof f.name !== 'string' ||
-          !Number.isInteger(f.size) || f.size < 1 || f.size > 10 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(f.hash)))) continue;
-      return m;
-    } catch { /* A subject can contain the marker before the actual data. */ }
-  }
-  return null;
-}
-
 // A bounded copy of text that failed a check, for the person to inspect. Agents never receive it.
 export const rawCopy = (text: string) => {
   const buffer = Buffer.from(text, 'utf8');

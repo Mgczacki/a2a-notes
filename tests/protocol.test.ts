@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  decode, decodeLegacyTaskboard, encode, escapeMarkup, parseAgentFile, readAgentFile, sha256, unescapeMarkup, ProtocolError, type WireMessage,
+  decode, encode, escapeMarkup, parseAgentFile, readAgentFile, sha256, unescapeMarkup, ProtocolError, type WireMessage,
 } from '../src/protocol.ts';
 import { formatDescription } from '../src/mcp.ts';
 import { fixture } from './helpers.ts';
@@ -78,14 +78,6 @@ test('agent files: version 1 parses, an unknown version and a mismatch are refus
   assert.throws(() => parseAgentFile(file, { ...expected, subject: 'Other' }), /subject does not match/);
   assert.throws(() => readAgentFile(Buffer.from(file.toString('utf8').replace('Alex', 'Eve.')), { id: 'x', name: 'n', size: 1130, sha256: sha256(file) }, expected), /do not match the size and hash/);
   assert.throws(() => parseAgentFile(Buffer.from(file.toString('utf8').trimEnd())), /one trailing LF/);
-});
-
-test('old Taskboard v1 and v2 messages still decode for the switch', () => {
-  const v1 = 'Taskboard message: Status. Sent automatically by Taskboard from Alex. Open Taskboard Inbox to read.\n[Taskboard message v1]\n' + JSON.stringify({ id: 'abc-1', subject: 'Status', body: 'Ready.' });
-  assert.deepEqual(decodeLegacyTaskboard(v1), { id: 'abc-1', subject: 'Status', body: 'Ready.' });
-  const v2 = '[Taskboard message v2]\n' + JSON.stringify({ id: 'abc-2', subject: 'S', body: 'B', files: [{ id: 'F123', name: 'a.md', size: 3, hash: 'b'.repeat(64) }] });
-  assert.equal(decodeLegacyTaskboard(v2)?.files?.length, 1);
-  assert.equal(decodeLegacyTaskboard('hello'), null);
 });
 
 test('the format resource sample is a valid A2ANotes/1 message', () => {

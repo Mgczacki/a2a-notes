@@ -4,12 +4,16 @@
 // 2. The content check (both directions): a verdict for the policy (src/policy.ts). The default reviewer uses fixed
 //    rules. A person can configure a command, for example a model with no tools, that returns a verdict as JSON.
 // Message text is data. No check result can change a role, an approval, or a route.
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, extname } from 'node:path';
 import type { AgentRequest } from './protocol.ts';
 import type { Verdict } from './policy.ts';
 
-export interface BodyFlag { code: 'sender_note' | 'internal_term' | 'local_path' | 'secret' | 'code_term' | 'agent_detail' | 'ask_changed'; text: string; start: number; end: number; reason: string }
-export interface BodyCheck { flags: BodyFlag[]; instruction: 'matched' | 'changed' | 'unavailable'; at: string }
+export interface BodyFlag { code: 'sender_note' | 'internal_term' | 'local_path' | 'secret' | 'code_term' | 'agent_detail' | 'ask_changed' | 'command' | 'check_failed'; text: string; start: number; end: number; reason: string }
+// state: checking while a configured body check command runs (src/service.ts), done or failed after it
+export interface BodyCheck { flags: BodyFlag[]; instruction: 'matched' | 'changed' | 'unavailable'; at: string; state?: 'checking' | 'done' | 'failed' }
 
 const rules: { code: BodyFlag['code']; pattern: RegExp; reason: string }[] = [
   { code: 'sender_note', pattern: /\b(?:I will|I'll|I plan to|once I|my next step|my next check|the next check|we still need to)\b/i, reason: "Looks like a note about the sender's own work." },
@@ -144,4 +148,56 @@ export async function review(input: ReviewInput, reviewer?: Reviewer): Promise<R
   const other = await reviewer(input);
   const order = ['communication', 'uncertain', 'action-request', 'quarantine'];
   return { ...(order.indexOf(other.verdict) > order.indexOf(rules.verdict) ? other : rules), at: new Date().toISOString() };
+}
+
+// ---- body check command ----
+
+// A command that checks an outgoing body, for example a model with no tools. It reads
+// {"subject", "body", "audience", "instruction", "sentences"} as JSON on stdin and writes
+// {"flags": [{"text": "<an exact sentence from sentences>", "reason": "..."}]} on stdout.
+export type BodyChecker = (input: { subject: string; body: string; audience: string; instruction?: string }) => Promise<{ flags: BodyFlag[]; ok: boolean }>;
+export function commandBodyChecker(argv: string[], timeoutMs = 120_000): BodyChecker {
+  if (!argv.length) throw new Error('The body check command is empty.');
+  return input => new Promise(resolve => {
+    const spans = sentenceSpans(input.body);
+    const child = execFile(argv[0], argv.slice(1), { timeout: timeoutMs, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH, HOME: process.env.HOME } }, (error, stdout) => {
+      if (error) return resolve({ ok: false, flags: [] });
+      try {
+        const out = JSON.parse(stdout);
+        const value = out.structured_output || out;
+        if (!Array.isArray(value.flags)) throw new Error();
+        const flags: BodyFlag[] = [];
+        for (const f of value.flags.slice(0, 20)) {
+          const span = typeof f?.text === 'string' ? spans.find(s => s.text === f.text) : undefined;
+          if (span && typeof f.reason === 'string') flags.push({ code: 'command', ...span, reason: f.reason.slice(0, 200) });
+        }
+        resolve({ ok: true, flags });
+      } catch { resolve({ ok: false, flags: [] }); }
+    });
+    child.stdin?.end(JSON.stringify({ ...input, sentences: spans.map(s => s.text) }));
+  });
+}
+
+// ---- text of a file for the checks ----
+
+// UTF-8 text as it is. PDF through pdftotext and DOCX through unzip when those programs exist. Other files give a
+// short note, so a check command sees that the file has no readable text.
+export function fileTextForChecks(bytes: Buffer, name: string, limit = 262_144): string {
+  const type = extname(name).toLowerCase();
+  const dir = (type === '.pdf' || type === '.docx') ? mkdtempSync(join(tmpdir(), 'a2anotes-file-')) : '';
+  try {
+    if (type === '.pdf' && bytes.subarray(0, 5).toString() === '%PDF-') {
+      writeFileSync(join(dir, 'f.pdf'), bytes);
+      return execFileSync('pdftotext', ['-f', '1', '-l', '100', join(dir, 'f.pdf'), '-'], { timeout: 10_000, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8' }).slice(0, limit);
+    }
+    if (type === '.docx' && bytes.subarray(0, 2).toString() === 'PK') {
+      writeFileSync(join(dir, 'f.docx'), bytes);
+      const names = execFileSync('unzip', ['-Z1', join(dir, 'f.docx')], { timeout: 10_000, maxBuffer: 256 * 1024, encoding: 'utf8' });
+      if (/vbaProject|embeddings\/|activeX\/|externalLinks\//i.test(names)) return `(the DOCX file ${name} has embedded content)`;
+      const xml = execFileSync('unzip', ['-p', join(dir, 'f.docx'), 'word/document.xml'], { timeout: 10_000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' });
+      return xml.replace(/<w:p\b[^>]*>/g, '\n').replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').slice(0, limit);
+    }
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).slice(0, limit);
+  } catch { return `(the file ${name} has no readable text)`; }
+  finally { if (dir) rmSync(dir, { recursive: true, force: true }); }
 }

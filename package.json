@@ -1,6 +1,6 @@
 {
   "name": "a2a-notes",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A2A Notes: an MCP server that sends and receives A2ANotes/1 messages between people and their agents over Slack.",
   "type": "module",
   "license": "UNLICENSED",

@@ -71,7 +71,7 @@ export class SlackTransport implements Transport {
   }
 
   // returnTo: where the browser goes after sign-in. Only a loopback http(s) page is allowed, for example a local
-  // Taskboard dashboard, so the sign-in cannot send the browser to another site.
+  // client dashboard, so the sign-in cannot send the browser to another site.
   beginSignIn(returnTo?: string) {
     if (returnTo !== undefined && !isLoopbackPage(returnTo)) throw new TransportError('return_to must be a page on this computer (127.0.0.1 or localhost).', true);
     const verifier = randomBytes(32).toString('base64url'), state = randomBytes(32).toString('base64url');
@@ -101,6 +101,23 @@ export class SlackTransport implements Transport {
     savePrivate(this.file, { user: c.id, team: result.team.id, name, scopes, access: c.access_token, refresh: c.refresh_token,
       expires: c.expires_in ? Date.now() + Number(c.expires_in) * 1000 : undefined } satisfies Credentials);
     return p.returnTo;
+  }
+
+  // A workspace member with name and picture, cached for one hour like nameOf. A failed lookup gives undefined.
+  private people = new Map<string, { person: Person; at: number }>();
+  async personOf(address: string) {
+    const cached = this.people.get(address);
+    if (cached && Date.now() - cached.at < 3600_000) return cached.person;
+    try {
+      const c = this.self();
+      const { team, user } = parseSlackAddress(address);
+      if (team !== c.team) return undefined;
+      const info = await this.call('users.info', { user });
+      if (!info.user) return undefined;
+      const person = this.person(info.user, c.team);
+      this.people.set(address, { person, at: Date.now() });
+      return person;
+    } catch { return undefined; }
   }
 
   // The display name of a workspace member, cached for one hour. A failed lookup gives undefined.
@@ -171,7 +188,9 @@ export class SlackTransport implements Transport {
   private person(member: any, team: string): Person {
     return { address: slackAddress(team, String(member.id)), name: String(member.profile?.display_name || member.real_name || member.name || member.id),
       realName: String(member.real_name || member.profile?.real_name || ''), title: String(member.profile?.title || ''),
-      active: !member.deleted && !member.is_bot && !member.is_app_user, ...(member.profile?.email ? { email: String(member.profile.email) } : {}) };
+      active: !member.deleted && !member.is_bot && !member.is_app_user, ...(member.profile?.email ? { email: String(member.profile.email) } : {}),
+      // the profile picture address that Slack gives; a client downloads it without the Slack token
+      ...(/^https:\/\//.test(String(member.profile?.image_192 || member.profile?.image_72 || '')) ? { image: String(member.profile.image_192 || member.profile.image_72) } : {}) };
   }
 
   async findPeople(query: string, limit: number, cursor?: string) {
@@ -317,7 +336,7 @@ export class SlackTransport implements Transport {
       } catch (error) {
         // a rate limit stops the scan; another failure skips this conversation until the next scan
         if (error instanceof TransportError && error.retryAfter) throw error;
-        // Slack lists some conversations that this token cannot read: move the cursor past them, as Taskboard does
+        // Slack lists some conversations that this token cannot read: move the cursor past them
         if (error instanceof TransportError && /^Slack: (channel_not_found|not_in_channel|access_denied)$/.test(error.message)) { save(key(conversation), now.toFixed(6)); continue; }
         failure ||= error instanceof TransportError ? error : new TransportError((error as Error).message, false);
       }

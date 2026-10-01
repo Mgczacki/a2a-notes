@@ -63,7 +63,7 @@ function card(m, trusted) {
   if (m.allowed_actions.includes('send')) actions.append(el('button', { class: 'primary', onclick: act(() => api('/api/messages/' + m.id + '/send', { hash: m.hash })) }, m.state === 'delivery_uncertain' ? 'Check and send' : 'Send'));
   if (!m.failure && peer) actions.append(el('button', { onclick: act(() => api('/api/trusted', { address: peer, name: m.peer_name || peer, trusted: !trusted })) }, trusted ? 'Stop trusting sender' : 'Trust sender'));
   return el('article', { class: 'card', 'data-id': m.id },
-    el('div', { class: 'row' }, el('h3', {}, m.subject), el('span', { class: 'status ' + stateClass(m.state) }, m.state.replace('_', ' ')), el('span', { class: 'status info' }, 'for ' + m.audience), m.legacy ? el('span', { class: 'status info' }, 'old Taskboard format') : null),
+    el('div', { class: 'row' }, el('h3', {}, m.subject), el('span', { class: 'status ' + stateClass(m.state) }, m.state.replace('_', ' ')), el('span', { class: 'status info' }, 'for ' + m.audience)),
     el('dl', { class: 'meta' },
       el('dt', {}, m.direction === 'in' ? 'From' : 'To'), el('dd', {}, (m.peer_name ? m.peer_name + ' · ' : '') + peer + (trusted ? ' (trusted)' : ' (not trusted)')),
       el('dt', {}, 'Check'), el('dd', {}, m.review ? m.review.verdict + ': ' + m.review.reason : 'not checked'),

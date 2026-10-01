@@ -53,7 +53,7 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
     return channels.get(id)!;
   };
   const member = (u: FakeUser) => ({ id: u.id, team_id: team, name: u.name.toLowerCase().replace(/\s+/g, '.'), real_name: u.real_name || u.name, deleted: !!u.deleted, is_bot: !!u.is_bot,
-    profile: { display_name: u.name, real_name: u.real_name || u.name, title: '', ...(u.email ? { email: u.email } : {}) } });
+    profile: { display_name: u.name, real_name: u.real_name || u.name, title: '', image_192: `https://secure.gravatar.com/avatar/${u.id.toLowerCase()}?s=192`, ...(u.email ? { email: u.email } : {}) } });
   let base = '';
 
   const methods: Record<string, (p: Record<string, string>, user: string | undefined, raw: Buffer) => unknown> = {

@@ -21,16 +21,15 @@ export interface Note {
   id: string; messageId: string; direction: 'in' | 'out'; state: OutState | InState;
   from: string; to: string; peerName?: string; subject: string; body: string; audience: Audience;
   threadId: string; replyTo: string | null; agentFileId?: string; fileIds: string[]; hash: string;
-  bodyCheck?: BodyCheck; review?: ReviewResult; approval?: Approval; rejected?: { actor: string; at: string };
+  bodyCheck?: BodyCheck; review?: ReviewResult; approval?: Approval; rejected?: { actor: string; at: string; comment?: string };
   // the instruction that authorized an outgoing draft, used to compare the ask (src/checks.ts compareAsk)
   instruction?: string;
-  // client data for this note, for example taskboard.task_id. It stays in this store: it is not in the content
+  // client data for this note, for example myclient.task_id. It stays in this store: it is not in the content
   // hash and never goes over the transport (src/service.ts checkMetadata)
   metadata?: Metadata;
   createdBy?: { session: string; role: Role };
   transport?: { name: string; channel?: string; ts?: string; threadTs?: string; files?: Record<string, string> };
   failure?: { code: string; reason: string; raw?: string };
-  legacy?: 'taskboard-v1' | 'taskboard-v2';
   error?: string; seen?: string; created: string; updated: string; sendStartedAt?: string; sentAt?: string;
 }
 export type Metadata = Record<string, string | number | boolean | null>;

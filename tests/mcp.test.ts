@@ -94,7 +94,7 @@ test('tools and resources follow the session role, and two clients share one sto
   const message = await resource(agentA, `a2anotes://messages/${id}`);
   assert.equal(message.state, 'sent');
 
-  // Alex's side: an agent that does not use Taskboard reads the message after Alex approves it on the review page
+  // Alex's side: a command-line agent reads the message after Alex approves it on the review page
   const alexAgent = await connect(alex.url, alex.token('cli-agent', 'agent'));
   await call(alexAgent, 'a2anotes_sync');
   const inbox = await call(alexAgent, 'a2anotes_list_messages', { direction: 'incoming' });
@@ -135,7 +135,7 @@ test('the stdio bridge connects a command-line agent to the running service', as
 
 test('a person session gets a Slack sign-in link that returns to a local page, and healthz reports the version', async () => {
   const health = await (await fetch(`${alex.running.server.url}/healthz`)).json();
-  assert.deepEqual(health, { ok: true, version: '0.2.0' });
+  assert.deepEqual(health, { ok: true, version: '0.3.0' });
   const human = await connect(alex.url, alex.token('signin-person', 'person'));
   const agentClient = await connect(alex.url, alex.token('signin-agent', 'agent'));
   assert.ok(!(await agentClient.listTools()).tools.some(t => t.name === 'a2anotes_slack_sign_in'), 'only a person session can start a sign-in');

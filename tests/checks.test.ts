@@ -51,7 +51,7 @@ test('the rule reviewer quarantines instruction changes and holds risky requests
   assert.equal((await good(input('x'))).verdict, 'communication');
 });
 
-test('approval levels follow the Taskboard rules', () => {
+test('approval levels follow the level rules', () => {
   assert.equal(incomingApprover('communication', 2, true), 'reviewer');
   assert.equal(incomingApprover('communication', 2, false), 'person');
   assert.equal(incomingApprover('communication', 1, true), 'person');

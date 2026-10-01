@@ -63,7 +63,7 @@ export function slackText(wire: string, d: Display) {
 }
 
 // Reads the A2ANotes text from a Slack message `text`. Text without the data marker is returned as it is, so an
-// A2ANotes/1 post without blocks and an old Taskboard message still reach the core decoder.
+// A2ANotes/1 post without blocks still reaches the core decoder.
 export function readSlackText(raw: string): { text: string } | { error: string } {
   const text = unescapeMarkup(raw);
   const marker = `${DATA_MARKER}"`;

@@ -5,11 +5,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync, unlinkSync } from 'node:fs';
 import { sep } from 'node:path';
 import {
-  agentFileName, checkBody, checkFileName, checkSubject, decode, decodeLegacyTaskboard, encode, footerFor, isAddress, isUuid,
+  agentFileName, checkBody, checkFileName, checkSubject, decode, encode, footerFor, isAddress, isUuid,
   parseAgentFile, ProtocolError, rawCopy, readAgentFile, sha256, type Audience, type FileRef, type WireMessage, AUDIENCES, MAX_SUPPORT_FILES,
 } from './protocol.ts';
 import { checkPolicy, incomingApprover, outgoingApprover, type Approver, type Policy } from './policy.ts';
-import { checkOutgoingBody, review, type Reviewer } from './checks.ts';
+import { checkOutgoingBody, fileTextForChecks, review, type BodyCheck, type BodyChecker, type ReviewResult, type Reviewer } from './checks.ts';
 import { noteHash, ServiceError, Store, type Data, type Metadata, type Note, type Role, type StoredFile } from './store.ts';
 import { TransportError, type Received, type Transport } from './transport.ts';
 
@@ -18,6 +18,10 @@ export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 export interface ServiceOptions {
   store: Store; transport: Transport; reviewer?: Reviewer;
+  // a command that checks outgoing bodies in addition to the fixed rules (src/checks.ts commandBodyChecker)
+  bodyChecker?: BodyChecker;
+  // how long a draft call waits for the checks before it returns and the checks finish in the background
+  checkWaitMs?: number;
   // the only folder that stage_file reads a path from
   stagingDir?: string;
   scanIntervalMs?: number;
@@ -31,14 +35,14 @@ const page = <T>(items: T[], limit: unknown, cursor: unknown) => {
   return { items: slice, ...(start + size < items.length ? { next_cursor: String(start + size) } : {}) };
 };
 
-// Client metadata: at most 20 keys with a client prefix (for example taskboard.task_id), plain values, 4 KiB in all.
+// Client metadata: at most 20 keys with a client prefix (for example myclient.task_id), plain values, 4 KiB in all.
 export function checkMetadata(value: unknown): Metadata | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'object' || Array.isArray(value)) throw new ServiceError('invalid_input', 'metadata must be an object.');
   const entries = Object.entries(value as Record<string, unknown>);
   if (entries.length > 20) throw new ServiceError('invalid_input', 'metadata can have at most 20 keys.');
   for (const [key, v] of entries) {
-    if (!/^[a-z][a-z0-9_-]{0,30}\.[a-z0-9_.-]{1,60}$/.test(key)) throw new ServiceError('invalid_input', `The metadata key ${JSON.stringify(key).slice(0, 80)} needs a client prefix, for example taskboard.task_id.`);
+    if (!/^[a-z][a-z0-9_-]{0,30}\.[a-z0-9_.-]{1,60}$/.test(key)) throw new ServiceError('invalid_input', `The metadata key ${JSON.stringify(key).slice(0, 80)} needs a client prefix, for example myclient.task_id.`);
     if (!(v === null || typeof v === 'boolean' || typeof v === 'number' && Number.isFinite(v) || typeof v === 'string' && v.length <= 500 && !/[\x00-\x1f\x7f]/.test(v)))
       throw new ServiceError('invalid_input', `The metadata value for ${key} must be text of at most 500 characters, a number, true, false, or null.`);
   }
@@ -156,6 +160,7 @@ export class NotesService {
       body_check: open ? n.bodyCheck ?? null : null,
       review: n.review ? { verdict: n.review.verdict, reason: open ? n.review.reason : '(visible to the person only)', reviewer: n.review.reviewer, at: n.review.at } : null,
       approval: n.approval ? { ...n.approval, current: n.approval.hash === n.hash } : null,
+      rejected: n.rejected ?? null,
       agent_file: agentFile ? { id: agentFile.id, name: agentFile.name, size: agentFile.size, sha256: agentFile.sha256, status: release ? 'released' : 'held',
         ...(release && agentFile.agentRequest ? { data: agentFile.agentRequest } : {}) } : null,
       files: files.filter(f => f.kind === 'support').map(f => ({ id: f.id, name: f.name, size: f.size, sha256: f.sha256, ...(release ? { status: 'released' } : { status: 'held' }) })),
@@ -182,6 +187,13 @@ export class NotesService {
     if (typeof query !== 'string' || query.trim().length < 2 || query.length > 200) throw new ServiceError('invalid_input', 'The search text must have 2 to 200 characters.', 'Search with a longer name or an email address.');
     const result = await this.wrap(() => this.transport.findPeople(query, Math.min(50, Math.max(1, Number(limit) || 10)), typeof cursor === 'string' ? cursor : undefined));
     return { people: result.people.map(p => ({ address: p.address, name: p.name, real_name: p.realName, title: p.title, active: p.active })), ...(result.next ? { next_cursor: result.next } : {}) };
+  }
+  // A member of the transport workspace: name, title, and profile picture address.
+  async getPerson(address: unknown) {
+    if (!isAddress(address)) throw new ServiceError('invalid_input', 'address must be a transport address.');
+    const p = await this.transport.personOf?.(address);
+    if (!p) throw new ServiceError('not_found', 'No member has this address.', 'Use a2anotes_find_people to find the address.');
+    return { address: p.address, name: p.name, real_name: p.realName, title: p.title, active: p.active, image_url: p.image ?? null };
   }
   list(session: Session, input: { direction?: string; state?: string; audience?: string; limit?: unknown; cursor?: unknown }) {
     const data = this.store.read();
@@ -311,12 +323,13 @@ export class NotesService {
       ...(threadTs ? { transport: { name: this.transport.name, threadTs } } : {}), created: now, updated: now,
     };
     note.hash = noteHash(note, files);
-    await this.check(note, files);
+    const finish = await this.check(note, files);
     this.store.change(d => {
       if (d.requests[requestId]) return;
       d.notes.push(note); d.requests[requestId] = { tool: 'create_draft', id: note.id, at: now };
       this.store.audit(d, session.name, 'create_draft', note.id);
     });
+    finish?.();
     data = this.store.read();
     return this.get(session, data.requests[requestId].id);
   }
@@ -336,25 +349,49 @@ export class NotesService {
     if (fields.agentFile) next.agentFileId = fields.agentFile.id; else delete next.agentFileId;
     delete next.approval; delete next.rejected; delete next.error;
     next.hash = noteHash(next, files);
-    await this.check(next, files);
+    const finish = await this.check(next, files);
     this.store.update(n.id, (x, d) => {
       if (x.hash !== n.hash) throw new ServiceError('hash_changed', 'The draft changed during the revision.', 'Read it again.');
       Object.assign(x, next);
       if (!next.agentFileId) delete x.agentFileId;
       delete x.approval; delete x.rejected; delete x.error;
+      if (!next.review) delete x.review;
       this.store.audit(d, session.name, 'revise_draft', n.id, 'approval ended');
     });
+    finish?.();
     return this.get(session, n.id);
   }
 
-  // Runs the body check and the content check on a draft. It changes the note object only.
-  private async check(n: Note, files: StoredFile[]) {
-    const agent = files.find(f => f.kind === 'agent')?.agentRequest;
-    n.bodyCheck = checkOutgoingBody(n.body, { agentFile: agent, instruction: n.instruction });
-    n.review = await review({ direction: n.direction === 'in' ? 'incoming' : 'outgoing', subject: n.subject, body: n.body, files: files.map(f => ({ name: f.name, text: this.fileText(f) })) }, this.reviewer);
+  // Runs the checks on a draft and changes the note object. The fixed rules finish at once. A configured check
+  // command can take longer: when the checks do not finish within checkWaitMs, the note keeps no verdict (so nobody
+  // may approve it) and the returned function, called after the note is stored, saves the result later. The saved
+  // result applies only while the draft still has the same hash.
+  private async check(n: Note, files: StoredFile[]): Promise<(() => void) | undefined> {
+    const rules = checkOutgoingBody(n.body, { agentFile: files.find(f => f.kind === 'agent')?.agentRequest, instruction: n.instruction });
+    const work = this.runChecks(n, files, rules);
+    const wait = this.options.checkWaitMs ?? 1500;
+    const done = await Promise.race([work, new Promise<undefined>(r => setTimeout(() => r(undefined), wait).unref())]);
+    if (done) { n.bodyCheck = done.bodyCheck; n.review = done.review; return undefined; }
+    n.bodyCheck = { ...rules, state: 'checking' }; delete n.review;
+    const id = n.id, hash = n.hash;
+    return () => { void work.then(r => {
+      try { this.store.update(id, x => { if (x.hash === hash) { x.bodyCheck = r.bodyCheck; x.review = r.review; } }); } catch { /* the draft was removed */ }
+    }); };
+  }
+  private async runChecks(n: Note, files: StoredFile[], rules: BodyCheck): Promise<{ bodyCheck: BodyCheck; review: ReviewResult }> {
+    const input = { direction: n.direction === 'in' ? 'incoming' as const : 'outgoing' as const, subject: n.subject, body: n.body, files: files.map(f => ({ name: f.name, text: this.fileText(f) })) };
+    const [verdict, extra] = await Promise.all([
+      review(input, this.reviewer),
+      this.options.bodyChecker ? this.options.bodyChecker({ subject: n.subject, body: n.body, audience: n.audience, ...(n.instruction ? { instruction: n.instruction } : {}) }) : undefined,
+    ]);
+    if (!extra) return { bodyCheck: { ...rules, state: 'done' }, review: verdict };
+    if (!extra.ok) return { review: verdict, bodyCheck: { ...rules, state: 'failed', flags: [...rules.flags,
+      { code: 'check_failed', text: '', start: 0, end: 0, reason: 'The message check command did not finish. The person must approve this draft.' }] } };
+    const flags = [...rules.flags, ...extra.flags.filter(f => !rules.flags.some(r => r.start <= f.start && r.end >= f.end))].sort((a, b) => a.start - b.start);
+    return { bodyCheck: { ...rules, flags, state: 'done' }, review: verdict };
   }
   private fileText(f: StoredFile) {
-    try { return new TextDecoder('utf-8', { fatal: true }).decode(this.store.readFileBytes(f)).slice(0, 262_144); } catch { return `(binary file ${f.name})`; }
+    try { return fileTextForChecks(this.store.readFileBytes(f), f.name); } catch { return `(the file ${f.name} has no readable text)`; }
   }
 
   reviewMessage(session: Session, id: unknown) {
@@ -377,7 +414,7 @@ export class NotesService {
       if (approver === 'nobody') throw new ServiceError('not_approvable', 'The checks hold this message. Nobody can approve it.', 'The person can inspect it on the review page.');
       if (session.role === 'reviewer' && approver !== 'reviewer') throw new ServiceError('needs_person', 'This message needs the person to decide.', 'Ask the person to open the review page.');
       const at = new Date().toISOString();
-      if (input.decision === 'reject') { n.state = 'rejected'; n.rejected = { actor: session.name, at }; delete n.approval; }
+      if (input.decision === 'reject') { n.state = 'rejected'; n.rejected = { actor: session.name, at, ...(typeof input.review_context === 'string' && input.review_context.trim() ? { comment: input.review_context.slice(0, 2000) } : {}) }; delete n.approval; }
       else { n.state = 'approved'; n.approval = { by: session.role === 'person' ? 'person' : 'reviewer', actor: session.name, at, hash: n.hash, policyVersion: data.policy.version }; }
       this.store.audit(data, session.name, input.decision === 'reject' ? 'reject' : 'approve', n.id, typeof input.review_context === 'string' ? input.review_context : undefined);
     });
@@ -534,8 +571,6 @@ export class NotesService {
       this.store.audit(d, 'service', 'parse_failure', id, `${code}: ${reason}`);
     });
     if (m.error) return fail('malformed', m.error);
-    const legacy = decodeLegacyTaskboard(m.text);
-    if (legacy) return this.receiveLegacy(m, legacy, base);
     const decoded = decode(m.text);
     if (!decoded.ok) {
       if (decoded.code === 'not_a2anotes') return; // ordinary Slack chat stays outside the inbox
@@ -578,19 +613,6 @@ export class NotesService {
       d.files.push(...stored); d.notes.push(note);
       this.store.audit(d, 'service', 'received', id, note.review!.verdict);
     });
-  }
-
-  private async receiveLegacy(m: Received, legacy: NonNullable<ReturnType<typeof decodeLegacyTaskboard>>, base: Omit<Note, 'messageId' | 'state' | 'subject' | 'body' | 'audience' | 'threadId' | 'replyTo' | 'hash'>) {
-    const messageId = legacy.id;
-    if (this.store.read().notes.some(n => n.direction === 'in' && n.from === m.sender && n.messageId === messageId)) return;
-    const threadId = randomUUID();
-    const note: Note = { ...base, messageId, state: 'held', subject: legacy.subject.slice(0, 200) || '(no subject)', body: legacy.body, audience: 'person', threadId, replyTo: null, hash: '',
-      legacy: legacy.files ? 'taskboard-v2' : 'taskboard-v1',
-      ...(legacy.files?.length ? { error: `This Taskboard message lists ${legacy.files.length} file(s). A2A Notes does not import files from the old format.` } : {}) };
-    note.hash = noteHash(note, []);
-    note.review = await review({ direction: 'incoming', subject: note.subject, body: note.body, files: [] }, this.reviewer);
-    if (note.review.verdict === 'quarantine') note.state = 'quarantined';
-    this.store.change(d => { if (!d.notes.some(n => n.id === note.id)) { d.notes.push(note); this.store.audit(d, 'service', 'received_legacy', note.id); } });
   }
 
   private async wrap<T>(fn: () => Promise<T>): Promise<T> {

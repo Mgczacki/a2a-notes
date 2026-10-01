@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { startFakeSlack, type FakeSlack } from '../src/fake-slack.ts';
-import { NotesService, type Session } from '../src/service.ts';
+import { NotesService, type ServiceOptions, type Session } from '../src/service.ts';
 import { SlackTransport } from '../src/slack.ts';
 import { savePrivate, Store } from '../src/store.ts';
 import { sha256, writeAgentFile, type AgentRequest } from '../src/protocol.ts';
@@ -26,7 +26,7 @@ export function slackConfig(fake: FakeSlack, extra = {}) {
 }
 
 // One person's service with a signed-in fake Slack member. The same dir gives the same store after a restart.
-export function personService(fake: FakeSlack, user: string, dir = mkdtempSync(join(tmpdir(), `a2an-${user}-`)), extra: { stagingDir?: string } = {}) {
+export function personService(fake: FakeSlack, user: string, dir = mkdtempSync(join(tmpdir(), `a2an-${user}-`)), extra: Partial<ServiceOptions> = {}) {
   savePrivate(join(dir, 'slack-credentials.json'), fake.credentials(user));
   const transport = new SlackTransport(join(dir, 'slack-credentials.json'), slackConfig(fake));
   const service = new NotesService({ store: new Store(dir), transport, scanIntervalMs: 0, ...extra });

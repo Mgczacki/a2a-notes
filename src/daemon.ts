@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import { Clients } from './clients.ts';
-import { commandReviewer } from './checks.ts';
+import { commandBodyChecker, commandReviewer } from './checks.ts';
 import { startHttp } from './http.ts';
 import { NotesService } from './service.ts';
 import { SlackTransport, type SlackConfig } from './slack.ts';
@@ -15,7 +15,9 @@ import { savePrivate, Store } from './store.ts';
 export interface Config {
   port: number; host?: string;
   slack: SlackConfig;
+  // commands for the content check and the outgoing body check (src/checks.ts); the fixed rules always run
   reviewCommand?: string[];
+  bodyCheckCommand?: string[];
   stagingDir?: string;
   scanIntervalSeconds?: number;
 }
@@ -38,6 +40,7 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
   const store = new Store(dir);
   const slack = new SlackTransport(join(dir, 'slack-credentials.json'), config.slack, fetcher);
   const service = new NotesService({ store, transport: slack, reviewer: config.reviewCommand?.length ? commandReviewer(config.reviewCommand) : undefined,
+    bodyChecker: config.bodyCheckCommand?.length ? commandBodyChecker(config.bodyCheckCommand) : undefined,
     stagingDir: config.stagingDir, scanIntervalMs: (config.scanIntervalSeconds ?? 60) * 1000 });
   const clients = new Clients(dir);
   // the local secret lets the command-line tool on this account ask the running service for a page sign-in code

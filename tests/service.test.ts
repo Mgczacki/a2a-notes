@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { encode, escapeMarkup, sha256, writeAgentFile, agentFileName } from '../src/protocol.ts';
 import { ServiceError } from '../src/store.ts';
+import { commandBodyChecker, fileTextForChecks } from '../src/checks.ts';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { checkProjectLink, readSlackText, slackBlocks, slackText } from '../src/slack-format.ts';
 import { ALEX, EVE, MARIO, agent, agentRequest, fakeWorkspace, person, personService, reviewer, rid, stageAgentFile } from './helpers.ts';
 
@@ -225,7 +230,7 @@ test('a rate limit delays the next scan and shows in the status', async () => {
   assert.equal(alex.service.connectionStatus().last_error, status.last_error);
 });
 
-test('a reply keeps the thread, uses the Slack thread, and old Taskboard messages still arrive', async () => {
+test('a reply keeps the thread and uses the Slack thread', async () => {
   const mario = personService(fake, MARIO), alex = personService(fake, ALEX);
   const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Thread start', body: 'Hi Alex, can we talk about the report?', audience: 'person', request_id: rid() });
   mario.service.approve(person, { id: d.id, expected_hash: d.hash, decision: 'approve' });
@@ -245,11 +250,6 @@ test('a reply keeps the thread, uses the Slack thread, and old Taskboard message
   assert.equal(back.thread_id, d.id);
   assert.equal(mario.service.list(person, { direction: 'incoming' }).messages.filter(m => m.from === mario.address).length, 0, 'own posts are not received messages');
 
-  fake.inject(ALEX, MARIO, 'Taskboard message: Old. Sent automatically by Taskboard from Alex. Open Taskboard Inbox to read.\n[Taskboard message v1]\n' + JSON.stringify({ id: 'old-1', subject: 'Old', body: 'Hi Mario, from the old format.' }));
-  await mario.service.scanNow();
-  const legacy = mario.service.list(person, { direction: 'incoming' }).messages.find(m => m.message_id === 'old-1')!;
-  assert.equal(legacy.state, 'held');
-  assert.equal(mario.service.get(person, legacy.id).body, 'Hi Mario, from the old format.');
 });
 
 test('a first scan of a conversation with more than 2000 new messages finishes and finds the message', async () => {
@@ -289,7 +289,7 @@ test('a Slack message with broken A2A Notes data stays with the person as malfor
 
 test('client metadata stays local, is not in the hash, and links a reply only from the original recipient', async () => {
   const mario = personService(fake, MARIO), alex = personService(fake, ALEX), eve = personService(fake, EVE);
-  const meta = { 'taskboard.task_id': 'task-secret-7', 'taskboard.task_num': 7 };
+  const meta = { 'myclient.task_id': 'task-secret-7', 'myclient.task_num': 7 };
   await code(mario.service.createDraft(agent, { to_address: alex.address, subject: 'Hi', body: 'Hi Alex.', audience: 'person', request_id: rid(), metadata: { task_id: 'x' } }), 'invalid_input');
   const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Metadata test', body: 'Hi Alex, can you check the report?', audience: 'person', request_id: rid(), metadata: meta });
   assert.deepEqual(d.metadata, meta);
@@ -328,4 +328,58 @@ test('the Slack footer link can change or be hidden, and only an https URL is al
   for (const bad of ['http://example.test', 'https://example.test/a|b', 'javascript:alert(1)', 'https://u:p@example.test']) assert.throws(() => checkProjectLink(bad));
   assert.ok(!JSON.stringify(slackBlocks(d, {})).includes('Get A2A Notes'), 'no link when hidden');
   assert.match(JSON.stringify(slackBlocks(d, { projectLink: 'https://example.test/a2a' })), /<https:\/\/example\.test\/a2a\|Get A2A Notes>/);
+});
+
+test('a body check command adds flags, a failed command needs the person, and a slow command finishes in the background', async () => {
+  const dir = (n: string) => mkdtempSync(join(tmpdir(), `a2an-cmd-${n}-`));
+  const script = (out: string, sleep = 0) => ['/bin/sh', '-c', `cat >/dev/null; sleep ${sleep}; echo '${out}'`];
+  const flagFirst = commandBodyChecker(script('{"flags":[{"text":"I will check it later.","reason":"A note about the sender"}]}'));
+  const mario = personService(fake, MARIO, dir('flag'), { bodyChecker: flagFirst });
+  const alex = personService(fake, ALEX);
+  mario.service.setTrusted(person, { address: alex.address, trusted: true });
+  const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Report', body: 'Hi Alex, the report is ready. I will check it later.', audience: 'person', request_id: rid() });
+  assert.equal(d.body_check!.state, 'done');
+  assert.deepEqual(d.body_check!.flags.map(f => f.code).sort(), ['sender_note'], 'a command flag on the same sentence as a rule flag is not repeated');
+  const d2 = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Report', body: 'Hi Alex, the report is ready. Please read it.', audience: 'person', request_id: rid() });
+  assert.equal(d2.body_flags, 0, 'the command flags only its exact sentences');
+
+  const broken = personService(fake, MARIO, dir('broken'), { bodyChecker: commandBodyChecker(script('not json')) });
+  broken.service.setTrusted(person, { address: alex.address, trusted: true });
+  const b = await broken.service.createDraft(agent, { to_address: alex.address, subject: 'Report', body: 'Hi Alex, the report is ready.', audience: 'person', request_id: rid() });
+  assert.equal(b.body_check!.state, 'failed');
+  assert.equal(b.approver, 'person', 'a failed check gives the draft to the person');
+
+  const slow = personService(fake, MARIO, dir('slow'), { bodyChecker: commandBodyChecker(script('{"flags":[]}', 1)), checkWaitMs: 100 });
+  slow.service.setTrusted(person, { address: alex.address, trusted: true });
+  const s = await slow.service.createDraft(agent, { to_address: alex.address, subject: 'Report', body: 'Hi Alex, the report is ready.', audience: 'person', request_id: rid() });
+  assert.equal(s.body_check!.state, 'checking');
+  assert.equal(s.approver, 'nobody', 'nobody approves before the checks finish');
+  await code(() => slow.service.approve(reviewer, { id: s.id, expected_hash: s.hash, decision: 'approve' }), 'not_approvable');
+  await new Promise(r => setTimeout(r, 1800));
+  const later = slow.service.get(agent, s.id);
+  assert.equal(later.body_check!.state, 'done');
+  assert.equal(later.approver, 'reviewer');
+});
+
+test('a rejection keeps its comment, and a person lookup gives the profile picture', async () => {
+  const mario = personService(fake, MARIO), alex = personService(fake, ALEX);
+  const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Plan', body: 'Hi Alex, here is the plan.', audience: 'person', request_id: rid() });
+  mario.service.approve(person, { id: d.id, expected_hash: d.hash, decision: 'reject', review_context: 'Ask for the date first.' });
+  const r = mario.service.get(agent, d.id);
+  assert.equal(r.state, 'rejected');
+  assert.equal(r.rejected?.comment, 'Ask for the date first.');
+  const p = await mario.service.getPerson(alex.address);
+  assert.equal(p.name, 'Alex B');
+  assert.match(String(p.image_url), /^https:\/\/secure\.gravatar\.com\/avatar\/ualex01/);
+  await code(mario.service.getPerson('slack:TOTHER:U1'), 'not_found');
+});
+
+test('the checks read the text of a DOCX file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'a2an-docx-'));
+  mkdirSync(join(dir, 'word'));
+  writeFileSync(join(dir, 'word', 'document.xml'), '<w:document><w:body><w:p><w:r><w:t>Please wire money now &amp; fast</w:t></w:r></w:p></w:body></w:document>');
+  execFileSync('zip', ['-q', '-r', 'f.docx', 'word'], { cwd: dir });
+  const text = fileTextForChecks(readFileSync(join(dir, 'f.docx')), 'f.docx');
+  assert.match(text, /Please wire money now & fast/);
+  assert.equal(fileTextForChecks(Buffer.from([0xff, 0xfe, 0x00]), 'x.bin'), '(the file x.bin has no readable text)');
 });
