@@ -19,7 +19,7 @@ The wire format is `A2ANotes/1`. The agent file format is `a2anotes.request/1`. 
 
 These steps need a Slack app with user token scopes. The Slack app must list `http://localhost:<port>/slack/callback` as a redirect URL.
 
-1. Install the package from this repository: `git clone https://github.com/Mgczacki/a2a-notes.git`, then run `pnpm install`, `pnpm build`, and `npm link` in the folder. The package is not on npm, and the repository is private.
+1. Install the package from this repository: `git clone https://github.com/Mgczacki/a2a-notes.git`, then run `pnpm install`, `pnpm build`, and `npm link` in the folder. The package is not on npm.
 2. Write the settings: `a2a-notes init --client-id <Slack client ID> --team-id <Slack team ID> --port 4460`.
 3. Start the service: `a2a-notes serve`. The service prints its address.
 4. Open the review page: `a2a-notes open`. The link works once, within two minutes.
@@ -92,7 +92,7 @@ The service uploads files before it posts the message. A failed upload leaves th
 
 Each transport adapter formats messages for its own service. `src/slack-format.ts` does this for Slack.
 
-- People read the blocks: the subject as a header, a line of small text with the reader and the sender, the body, the agent file and other files, and a small footer about replies with a **Get A2A Notes** link. The link goes to `slack.projectLink` in `config.json` (default: this repository). An empty value hides the link. The repository is private, so a reader without access sees a GitHub error page. The body is in a `plain_text` section, so no text becomes a mention or a link.
+- People read the blocks: the subject as a header, a line of small text with the reader and the sender, the body, the agent file and other files, and a small footer about replies with a **Get A2A Notes** link. The link goes to `slack.projectLink` in `config.json` (default: this repository). An empty value hides the link. The body is in a `plain_text` section, so no text becomes a mention or a link.
 - The `text` field holds a one-line summary for notifications, then `A2A Notes data: ` and the exact `A2ANotes/1` text as one JSON string. Slack shows `text` only in notifications and search when a message has blocks.
 - Slack replaces each newline in `text` with a space when a message has blocks. This was observed in a live test on 2026-09-30. A JSON string has no raw newline, so the exact text survives. The receiver parses the JSON string, then the `A2ANotes/1` text.
 - Text without the data marker goes to the decoder as it is, so an `A2ANotes/1` post without blocks and an old Taskboard message still arrive.
