@@ -2,7 +2,7 @@
 // and the Slack sign-in redirect (/slack/callback). It listens on loopback only and accepts only loopback Host headers.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createMcpServer } from './mcp.ts';
+import { createMcpServer, VERSION } from './mcp.ts';
 import { reviewPage } from './page.ts';
 import { ServiceError } from './store.ts';
 import type { NotesService, Session } from './service.ts';
@@ -44,14 +44,14 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
       if (!session) return send(res, 401, { jsonrpc: '2.0', error: { code: -32001, message: 'A valid A2A Notes client token is required.' }, id: null }, { 'www-authenticate': 'Bearer' });
       if (req.method !== 'POST') return send(res, 405, { jsonrpc: '2.0', error: { code: -32000, message: 'This server is stateless. Use POST.' }, id: null }, { allow: 'POST' });
       const body = await readBody(req);
-      const server = createMcpServer(service, session, { pageLink });
+      const server = createMcpServer(service, session, { pageLink, ...(options.slack ? { slackSignIn: (returnTo?: string) => options.slack!.beginSignIn(returnTo) } : {}) });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => { void transport.close(); void server.close(); });
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
       return;
     }
-    if (url.pathname === '/healthz') return send(res, 200, { ok: true });
+    if (url.pathname === '/healthz') return send(res, 200, { ok: true, version: VERSION });
     // the command-line tool on this account proves access to the data folder with the local secret
     if (url.pathname === '/local/login-code' && req.method === 'POST') {
       if (!options.local?.(String(req.headers['x-a2a-local'] || ''))) return send(res, 403, { error: { code: 'forbidden', reason: 'The local secret does not match.' } });
@@ -70,11 +70,13 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
     }
     if (url.pathname === '/slack/callback') {
       if (!options.slack) return send(res, 404, { error: { code: 'not_found', reason: 'Slack is not configured.' } });
-      try { await options.slack.finishSignIn(url.searchParams.get('state') || '', url.searchParams.get('code') || ''); }
+      let returnTo: string | undefined;
+      try { returnTo = await options.slack.finishSignIn(url.searchParams.get('state') || '', url.searchParams.get('code') || ''); }
       catch (error) { return res.writeHead(400, { 'content-type': 'text/plain' }).end(`Slack sign-in failed: ${(error as Error).message}`); }
       void service.scanNow().catch(() => {});
-      // Slack returns to the redirect host (localhost). The page cookie belongs to the host of the sign-in link.
-      return res.writeHead(303, { location: `${base}/` }).end();
+      // back to the client page that started the sign-in (beginSignIn checked that it is on this computer), or to the
+      // review page; Slack returns to the redirect host (localhost), and the page cookie belongs to the sign-in host
+      return res.writeHead(303, { location: returnTo || `${base}/` }).end();
     }
     const page = clients.page(cookie(req, 'a2an_page'));
     if (url.pathname === '/') {

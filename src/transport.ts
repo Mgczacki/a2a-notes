@@ -44,4 +44,6 @@ export interface Transport {
   // calls save after handle returns, so a failed message is read again at the next scan.
   scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void): Promise<{ conversations: number; messages: number }>;
   download(fileRef: string, received: Received, maxBytes: number): Promise<Buffer>;
+  // the display name of a member address, for the person reading the inbox (optional)
+  nameOf?(address: string): Promise<string | undefined>;
 }

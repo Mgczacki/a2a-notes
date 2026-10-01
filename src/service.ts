@@ -567,7 +567,8 @@ export class NotesService {
       this.store.writeFileBytes(file.id, bytes);
       stored.push(file);
     }
-    const note: Note = { ...base, ...known, replyTo: w.replyTo, body: w.body, state: 'held', hash: '',
+    const peerName = await this.transport.nameOf?.(m.sender);
+    const note: Note = { ...base, ...known, ...(peerName ? { peerName } : {}), replyTo: w.replyTo, body: w.body, state: 'held', hash: '',
       ...(stored[0]?.kind === 'agent' ? { agentFileId: stored[0].id } : {}), fileIds: stored.filter(f => f.kind === 'support').map(f => f.id) };
     note.hash = noteHash(note, stored);
     note.review = await review({ direction: 'incoming', subject: note.subject, body: note.body, files: stored.map(f => ({ name: f.name, text: this.fileText(f) })) }, this.reviewer);

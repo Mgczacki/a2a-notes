@@ -1,6 +1,6 @@
 {
   "name": "a2a-notes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A2A Notes: an MCP server that sends and receives A2ANotes/1 messages between people and their agents over Slack.",
   "type": "module",
   "license": "UNLICENSED",
@@ -25,7 +25,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p .",
     "test": "tsx --test tests/*.test.ts",
-    "prepack": "pnpm build"
+    "prepack": "pnpm build",
+    "prepare": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",

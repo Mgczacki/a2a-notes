@@ -132,3 +132,35 @@ test('the stdio bridge connects a command-line agent to the running service', as
   assert.equal(status.signed_in, true);
   await client.close();
 });
+
+test('a person session gets a Slack sign-in link that returns to a local page, and healthz reports the version', async () => {
+  const health = await (await fetch(`${alex.running.server.url}/healthz`)).json();
+  assert.deepEqual(health, { ok: true, version: '0.2.0' });
+  const human = await connect(alex.url, alex.token('signin-person', 'person'));
+  const agentClient = await connect(alex.url, alex.token('signin-agent', 'agent'));
+  assert.ok(!(await agentClient.listTools()).tools.some(t => t.name === 'a2anotes_slack_sign_in'), 'only a person session can start a sign-in');
+  const refused = await call(human, 'a2anotes_slack_sign_in', { return_to: 'https://evil.example/' });
+  assert.equal(refused.error.code, 'invalid_input');
+  const link = await call(human, 'a2anotes_slack_sign_in', { return_to: 'http://127.0.0.1:4317/#inbox' });
+  // the fake Slack authorize page lists one sign-in link for each member; follow the one for Alex
+  const page = await (await fetch(link.url)).text();
+  const target = /href="([^"]+)">Sign in as Alex/.exec(page)![1].replace(/&amp;/g, '&');
+  const callback = new URL(target);
+  const back = await fetch(`${alex.running.server.url}${callback.pathname}${callback.search}`, { redirect: 'manual' });
+  assert.equal(back.status, 303);
+  assert.equal(back.headers.get('location'), 'http://127.0.0.1:4317/#inbox');
+  for (const c of [human, agentClient]) await c.close();
+});
+
+test('a received message shows the sender name from Slack', async () => {
+  const mario2 = await connect(mario.url, mario.token('name-agent', 'agent'));
+  const controller2 = await connect(mario.url, mario.token('name-reviewer', 'reviewer'));
+  const alexPerson = await connect(alex.url, alex.token('name-person', 'person'));
+  const d = await call(mario2, 'a2anotes_create_draft', { to_address: alex.address, subject: 'Name check', body: 'Hi Alex, this checks the sender name.', audience: 'person', request_id: `r-${randomUUID()}` });
+  await call(controller2, 'a2anotes_approve', { id: d.id, expected_hash: d.hash, decision: 'approve' });
+  await call(controller2, 'a2anotes_send', { id: d.id, expected_hash: d.hash, request_id: `r-${randomUUID()}` });
+  await call(alexPerson, 'a2anotes_sync');
+  const got = (await call(alexPerson, 'a2anotes_list_messages', { direction: 'incoming' })).messages.find((m: any) => m.message_id === d.id);
+  assert.equal(got.peer_name, 'Mario G');
+  for (const c of [mario2, controller2, alexPerson]) await c.close();
+});

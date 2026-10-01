@@ -29,6 +29,10 @@ export interface SlackConfig {
 interface Credentials { user: string; team: string; name: string; scopes: string[]; access: string; refresh?: string; expires?: number }
 
 export const slackAddress = (team: string, user: string) => `slack:${team}:${user}`;
+export function isLoopbackPage(value: string) {
+  try { const u = new URL(value); return (u.protocol === 'http:' || u.protocol === 'https:') && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) && !u.username && !u.password; }
+  catch { return false; }
+}
 export function parseSlackAddress(address: string) {
   const match = /^slack:([A-Z0-9]{2,20}):([UW][A-Z0-9]{2,20})$/.exec(address);
   if (!match) throw new TransportError('The address is not a Slack address (slack:<team ID>:<member ID>).', true);
@@ -41,7 +45,8 @@ export class SlackTransport implements Transport {
   private generation = 0;
   private refreshing?: Promise<void>;
   private blockedUntil = 0;
-  private pending?: { state: string; verifier: string; expires: number };
+  private pending?: { state: string; verifier: string; expires: number; returnTo?: string };
+  private names = new Map<string, { name: string; at: number }>();
   private readonly apiBase: string;
   private readonly projectLink: string | undefined;
   constructor(readonly file: string, readonly config: SlackConfig, private fetcher: typeof fetch = fetch) {
@@ -65,15 +70,19 @@ export class SlackTransport implements Transport {
     return url.host === api.host;
   }
 
-  beginSignIn() {
+  // returnTo: where the browser goes after sign-in. Only a loopback http(s) page is allowed, for example a local
+  // Taskboard dashboard, so the sign-in cannot send the browser to another site.
+  beginSignIn(returnTo?: string) {
+    if (returnTo !== undefined && !isLoopbackPage(returnTo)) throw new TransportError('return_to must be a page on this computer (127.0.0.1 or localhost).', true);
     const verifier = randomBytes(32).toString('base64url'), state = randomBytes(32).toString('base64url');
-    this.pending = { verifier, state, expires: Date.now() + 10 * 60_000 };
+    this.pending = { verifier, state, expires: Date.now() + 10 * 60_000, ...(returnTo ? { returnTo } : {}) };
     const params = new URLSearchParams({ client_id: this.config.clientId, user_scope: [...REQUIRED_SCOPES, ...OPTIONAL_SCOPES].join(','), team: this.config.teamId,
       state, redirect_uri: this.config.redirectUri, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
     return `${this.config.authorizeUrl || 'https://slack.com/oauth/v2/authorize'}?${params}`;
   }
 
-  async finishSignIn(state: string, code: string) {
+  // Returns the returnTo page from beginSignIn, if one was given.
+  async finishSignIn(state: string, code: string): Promise<string | undefined> {
     const generation = this.generation, p = this.pending;
     if (!p || p.expires < Date.now() || state !== p.state) throw new TransportError('Sign-in expired or did not start here.', true);
     this.pending = undefined;
@@ -91,6 +100,22 @@ export class SlackTransport implements Transport {
     if (generation !== this.generation) throw new TransportError('Sign-in was cancelled.', true);
     savePrivate(this.file, { user: c.id, team: result.team.id, name, scopes, access: c.access_token, refresh: c.refresh_token,
       expires: c.expires_in ? Date.now() + Number(c.expires_in) * 1000 : undefined } satisfies Credentials);
+    return p.returnTo;
+  }
+
+  // The display name of a workspace member, cached for one hour. A failed lookup gives undefined.
+  async nameOf(address: string) {
+    const cached = this.names.get(address);
+    if (cached && Date.now() - cached.at < 3600_000) return cached.name;
+    try {
+      const c = this.self();
+      const { team, user } = parseSlackAddress(address);
+      if (team !== c.team) return undefined;
+      const info = await this.call('users.info', { user });
+      const name = info.user ? this.person(info.user, c.team).name : undefined;
+      if (name) this.names.set(address, { name, at: Date.now() });
+      return name;
+    } catch { return undefined; }
   }
 
   private async request(method: string, params: Record<string, string>, token?: string): Promise<any> {
