@@ -1,0 +1,44 @@
+{
+  "name": "a2a-notes",
+  "version": "0.1.0",
+  "description": "A2A Notes: an MCP server that sends and receives A2ANotes/1 messages between people and their agents over Slack.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "bin": {
+    "a2a-notes": "bin/a2a-notes.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./fake-slack": "./dist/fake-slack.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "tsx --test tests/*.test.ts",
+    "prepack": "pnpm build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mgczacki/a2a-notes.git"
+  },
+  "private": true
+}

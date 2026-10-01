@@ -1,0 +1,15 @@
+A2ANotes/1
+ID: 8a5f74c0-5c03-4d97-b4e6-3e72842cfa11
+From: slack:TEXAMPLE:UMARIO01
+To: slack:TEXAMPLE:UALEX01
+Subject: Please confirm the Stage hosting settings
+Audience: both
+Thread-ID: 8a5f74c0-5c03-4d97-b4e6-3e72842cfa11
+Reply-To: none
+Body-Bytes: 172
+Agent-File: 41aa8d61-72ee-43a9-860e-f51ec749de02 | "a2anotes-request-8a5f74c0-5c03-4d97-b4e6-3e72842cfa11.json" | 1130 | 79f37afcbdb025b9f4f86f9da1c55ebd071adfd1216b614f7c6c37305d0e080e
+Transport-File-Slack: 41aa8d61-72ee-43a9-860e-f51ec749de02 | FSTAGE01
+
+Hi Alex, thanks for confirming the hosting request for files.example.test. Please have your agent confirm the exact setting names for that hosting change before we make it.
+A2ANotes End/1
+Sent by Mario G with A2A Notes.

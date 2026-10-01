@@ -1,0 +1,40 @@
+{
+  "version": "a2anotes.request/1",
+  "message_id": "8a5f74c0-5c03-4d97-b4e6-3e72842cfa11",
+  "audience": "both",
+  "subject": "Please confirm the Stage hosting settings",
+  "target": {
+    "host": "files.example.test",
+    "cdn_account_id": null
+  },
+  "facts": [
+    {
+      "statement": "Alex confirmed the Stage hosting request.",
+      "source": "Alex reply",
+      "status": "confirmed"
+    },
+    {
+      "statement": "Earlier checks found the host in a shared CDN account.",
+      "source": "earlier checks",
+      "status": "reported"
+    }
+  ],
+  "agent_request": {
+    "when": "Before any hosting change.",
+    "ask": "Confirm the exact release key names and send the write plan.",
+    "details": [
+      {
+        "name": "release_keys",
+        "ask": "Confirm the exact key names for this release and explain their use."
+      },
+      {
+        "name": "conditional_write_plan",
+        "ask": "Describe each planned write, its condition, and what happens when the condition fails."
+      }
+    ],
+    "deadline": null
+  },
+  "unknowns": [
+    "The release key names and write plan are not in this message."
+  ]
+}
