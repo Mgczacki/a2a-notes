@@ -135,7 +135,7 @@ export class NotesService {
       id: n.id, message_id: n.messageId, direction: n.direction, state: n.state, audience: n.audience,
       subject: open ? n.subject : n.state === 'approved' && n.audience === 'person' ? PERSON_ONLY : HELD,
       from: n.from, to: n.to, peer_name: n.peerName, trusted: this.trusted(data, n.direction === 'in' ? n.from : n.to),
-      check: n.review ? { verdict: n.review.verdict, reviewer: n.review.reviewer } : null, body_flags: n.bodyCheck?.flags.length ?? null,
+      check: n.review ? { verdict: n.review.verdict, reviewer: n.review.reviewer } : null, body_flags: n.bodyCheck?.flags.length ?? null, format_warnings: n.bodyCheck?.warnings?.length ?? null,
       approver: this.approverFor(n, data), approved_by: n.approval && n.approval.hash === n.hash ? n.approval.by : null,
       thread_id: n.threadId, created: n.created, updated: n.updated, seen: !!n.seen, ...(n.failure ? { failure_code: n.failure.code } : {}),
       metadata: n.metadata ?? null, reply_to_local: this.replyLink(n, data),
@@ -400,7 +400,7 @@ export class NotesService {
     if (!n || !this.visible(n, data, session)) throw new ServiceError('not_found', 'No message has this ID.');
     const open = this.released(n, data, session);
     return { id: n.id, verdict: n.review?.verdict ?? null, reason: open ? n.review?.reason ?? n.failure?.reason ?? null : '(visible to the person only)',
-      body_flags: open ? n.bodyCheck?.flags ?? [] : [], instruction: n.bodyCheck?.instruction ?? null, approver: this.approverFor(n, data), hash: n.hash };
+      body_flags: open ? n.bodyCheck?.flags ?? [] : [], format_warnings: open ? n.bodyCheck?.warnings ?? [] : [], instruction: n.bodyCheck?.instruction ?? null, approver: this.approverFor(n, data), hash: n.hash };
   }
 
   approve(session: Session, input: { id?: unknown; expected_hash?: unknown; decision?: unknown; review_context?: unknown }) {

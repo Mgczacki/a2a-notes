@@ -34,6 +34,26 @@ async function body(req: IncomingMessage): Promise<{ raw: Buffer; params: Record
   return { raw, params };
 }
 
+// The Block Kit limits that Slack checks, so that a test fails where Slack would answer invalid_blocks: 50 blocks,
+// 150 characters in a header, 3,000 in a section text, and no empty rich_text element or text.
+function checkBlocks(blocks: any[]) {
+  const bad = () => { throw new Error('invalid_blocks'); };
+  const chars = (t: unknown) => typeof t === 'string' ? Array.from(t).length : bad() as never;
+  if (!Array.isArray(blocks) || blocks.length > 50) bad();
+  const rich = (e: any): void => {
+    if (e.type === 'text') { if (!chars(e.text)) bad(); return; }
+    if (e.type === 'link') { if (!/^https:\/\//.test(e.url) || (e.text !== undefined && !chars(e.text))) bad(); return; }
+    if (!['rich_text_section', 'rich_text_list', 'rich_text_quote', 'rich_text_preformatted'].includes(e.type) || !Array.isArray(e.elements) || !e.elements.length) bad();
+    if (e.type === 'rich_text_list' && (!['bullet', 'ordered'].includes(e.style) || e.indent < 0 || e.indent > 8 || e.elements.some((x: any) => x.type !== 'rich_text_section'))) bad();
+    e.elements.forEach(rich);
+  };
+  for (const b of blocks) {
+    if (b.type === 'header' && chars(b.text?.text) > 150) bad();
+    if (b.type === 'section' && b.text && chars(b.text.text) > 3000) bad();
+    if (b.type === 'rich_text') { if (!Array.isArray(b.elements) || !b.elements.length) bad(); b.elements.forEach(rich); }
+  }
+}
+
 export async function startFakeSlack(options: { port?: number; team?: string; users: FakeUser[] }): Promise<FakeSlack> {
   const team = options.team || 'TFAKE01';
   const users = new Map(options.users.map(u => [u.id, u]));
@@ -89,6 +109,7 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
       // as in Slack: a user-token post through an app carries the app's bot_id and app_id, and a post with blocks has
       // each newline in its text replaced by a space (observed in a real workspace on 2026-09-30)
       const text = String(p.text || '');
+      if (p.blocks) checkBlocks(JSON.parse(p.blocks));
       const msg: Msg = { ts: nextTs(), user: user!, text: p.blocks ? text.replace(/\n/g, ' ') : text, bot_id: 'BFAKEAPP', app_id: 'AFAKEAPP',
         ...(p.blocks ? { blocks: JSON.parse(p.blocks) } : {}), ...(p.client_msg_id ? { client_msg_id: p.client_msg_id } : {}) };
       if (p.thread_ts) {
