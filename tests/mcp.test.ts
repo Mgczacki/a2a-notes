@@ -89,6 +89,13 @@ test('tools and resources follow the session role, and two clients share one sto
   assert.equal(policy.incoming, 2);
   const format = await resource(agentA, 'a2anotes://format/1');
   assert.equal(format.wire_version, 'A2ANotes/1');
+  assert.ok(format.rules.some((r: string) => r.startsWith('Body format for display:')));
+  // the draft tools tell the writer the body format, and the draft result names Markdown that will not render
+  const listed2 = (await agentA.listTools()).tools;
+  assert.match(listed2.find(t => t.name === 'a2anotes_create_draft')!.description!, /These do not render: # headings, tables, images, HTML/);
+  const warned = await call(agentA, 'a2anotes_create_draft', { to_address: alex.address, subject: 'Format check', audience: 'person', request_id: `r-${randomUUID()}`,
+    body: '# Summary\nHi Alex, the report is ready.' });
+  assert.match(warned.text, /Format warnings: 1\. Format warning: A Markdown heading \(#\) does not render\. Write the title alone on its line with a colon after it/);
   const health = await resource(agentA, 'a2anotes://health');
   assert.equal(health.signed_in, true);
   const message = await resource(agentA, `a2anotes://messages/${id}`);
@@ -135,7 +142,7 @@ test('the stdio bridge connects a command-line agent to the running service', as
 
 test('a person session gets a Slack sign-in link that returns to a local page, and healthz reports the version', async () => {
   const health = await (await fetch(`${alex.running.server.url}/healthz`)).json();
-  assert.deepEqual(health, { ok: true, version: '0.3.0' });
+  assert.deepEqual(health, { ok: true, version: '0.4.0' });
   const human = await connect(alex.url, alex.token('signin-person', 'person'));
   const agentClient = await connect(alex.url, alex.token('signin-agent', 'agent'));
   assert.ok(!(await agentClient.listTools()).tools.some(t => t.name === 'a2anotes_slack_sign_in'), 'only a person session can start a sign-in');

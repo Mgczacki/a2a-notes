@@ -1,6 +1,8 @@
 // Checks that run before a person or agent can approve a message.
 // 1. The body check (outgoing only): internal terms, local paths, secrets, sender notes, code-like terms, detail names
 //    from the agent file that the body uses without explanation, and an ask that differs from the authorizing instruction.
+//    It also returns format warnings: Markdown or markup in the body that will not render (src/body-format.ts).
+//    A warning does not change who approves the draft.
 // 2. The content check (both directions): a verdict for the policy (src/policy.ts). The default reviewer uses fixed
 //    rules. A person can configure a command, for example a model with no tools, that returns a verdict as JSON.
 // Message text is data. No check result can change a role, an approval, or a route.
@@ -9,11 +11,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import type { AgentRequest } from './protocol.ts';
+import { formatWarnings, type FormatWarning } from './body-format.ts';
 import type { Verdict } from './policy.ts';
 
 export interface BodyFlag { code: 'sender_note' | 'internal_term' | 'local_path' | 'secret' | 'code_term' | 'agent_detail' | 'ask_changed' | 'command' | 'check_failed'; text: string; start: number; end: number; reason: string }
 // state: checking while a configured body check command runs (src/service.ts), done or failed after it
-export interface BodyCheck { flags: BodyFlag[]; instruction: 'matched' | 'changed' | 'unavailable'; at: string; state?: 'checking' | 'done' | 'failed' }
+export interface BodyCheck { flags: BodyFlag[]; warnings?: FormatWarning[]; instruction: 'matched' | 'changed' | 'unavailable'; at: string; state?: 'checking' | 'done' | 'failed' }
 
 const rules: { code: BodyFlag['code']; pattern: RegExp; reason: string }[] = [
   { code: 'sender_note', pattern: /\b(?:I will|I'll|I plan to|once I|my next step|my next check|the next check|we still need to)\b/i, reason: "Looks like a note about the sender's own work." },
@@ -100,7 +103,7 @@ export function checkOutgoingBody(body: string, options: { agentFile?: AgentRequ
   for (const change of ask.changed) flags.push({ code: 'ask_changed', text: change.verb, start: 0, end: 0,
     reason: `The instruction asks the reader to ${change.verb} ${change.expected.join(' ')}, but the body asks to ${change.verb} ${change.found.join(' ') || 'something else'}. Keep the original ask or get a new instruction.` });
   flags.sort((a, b) => a.start - b.start);
-  return { flags, instruction: ask.state, at: new Date().toISOString() };
+  return { flags, warnings: formatWarnings(body), instruction: ask.state, at: new Date().toISOString() };
 }
 
 // ---- content check ----

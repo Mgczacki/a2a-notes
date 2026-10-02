@@ -72,6 +72,7 @@ function card(m, trusted) {
       el('dt', {}, 'Hash'), el('dd', { class: 'small' }, m.hash || 'none')),
     m.body ? el('div', { class: 'body' }, m.body) : null,
     m.body_check && m.body_check.flags.length ? el('ul', { class: 'flags' }, m.body_check.flags.map(f => el('li', {}, f.reason + (f.text && f.code !== 'ask_changed' ? ' Text: “' + f.text + '”' : '')))) : null,
+    m.body_check && m.body_check.warnings && m.body_check.warnings.length ? el('ul', { class: 'flags' }, m.body_check.warnings.map(w => el('li', {}, 'Format: ' + w.reason + (w.text ? ' Text: “' + w.text + '”' : '')))) : null,
     m.body_check && m.body_check.instruction === 'unavailable' && m.direction === 'out' ? el('p', { class: 'small' }, 'No instruction was given, so the check cannot say that the ask matches it.') : null,
     m.agent_file ? el('p', { class: 'small' }, 'Agent file: ' + m.agent_file.name + ' · ' + m.agent_file.size + ' bytes · SHA-256 ' + m.agent_file.sha256) : null,
     m.agent_file && m.agent_file.data ? el('details', {}, el('summary', {}, 'Show the agent file'), el('pre', {}, JSON.stringify(m.agent_file.data, null, 2))) : null,

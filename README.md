@@ -7,6 +7,8 @@ The wire format is `A2ANotes/1`. The agent file format is `a2anotes.request/1`. 
 ## What the package contains
 
 - `src/protocol.ts`: the `A2ANotes/1` codec and the `a2anotes.request/1` agent file checks.
+- `src/body-format.ts`: the body format that writers use, its parser, and the format warnings.
+- `src/slack-format.ts`: the Slack blocks and the Slack `text` field.
 - `src/checks.ts`: the body check for outgoing drafts and the content check for both directions.
 - `src/policy.ts`: approval levels 1, 2, and 3.
 - `src/service.ts`: drafts, files, approvals, sends, the inbox, and the Slack scan.
@@ -62,7 +64,8 @@ A peer that is not a trusted sender always needs the person. A quarantined or fa
 
 - Audience `person`: the body is the request. No agent file is allowed. An agent never receives the body.
 - Audience `agent` or `both`: one agent file is required. The draft uses the `message_id` from the agent file. The receiver releases the parsed file to an agent only after approval.
-- The body is text for a person. It must not be empty. A file cannot replace it.
+- The body is text for a person. It must not be empty. A file cannot replace it. The wire text keeps the body exactly as written.
+- [docs/WRITING-MESSAGES.md](docs/WRITING-MESSAGES.md) gives the writing rules, the body format, and what does not render.
 - A receiver holds an unknown major version with the code `unsupported_version`. It never parses such text as version 1.
 - Text that fails a check stays on the review page with the reason and a copy of at most 4000 bytes. Agents never receive it.
 - Ordinary Slack chat stays outside the inbox.
@@ -92,7 +95,9 @@ The service uploads files before it posts the message. A failed upload leaves th
 
 Each transport adapter formats messages for its own service. `src/slack-format.ts` does this for Slack.
 
-- People read the blocks: the subject as a header, a line of small text with the reader and the sender, the body, the agent file and other files, and a small footer about replies with a **Get A2A Notes** link. The link goes to `slack.projectLink` in `config.json` (default: this repository). An empty value hides the link. The body is in a `plain_text` section, so no text becomes a mention or a link.
+- People read the blocks: the subject as a header, a line of small text with the reader and the sender, the body, the agent file and other files, and a small footer about replies with a **Get A2A Notes** link. The link goes to `slack.projectLink` in `config.json` (default: this repository). An empty value hides the link.
+- The body shows as `rich_text` blocks: a bold title for each titled part, paragraphs, line breaks, lists, quotes, preformatted text, and https links. `src/body-format.ts` reads the body format. A text element in a `rich_text` block is literal text, so no mention or Slack markup in the body becomes active. Version 0.3.0 put the body in a `plain_text` section, and the Slack desktop app showed it as one paragraph without line breaks (observed on 2026-10-02).
+- Each body block holds at most 2,900 characters. A message has at most 50 blocks. A long part splits between paragraphs, sentences, or list items, never inside a word, a link, or code.
 - The `text` field holds a one-line summary for notifications, then `A2A Notes data: ` and the exact `A2ANotes/1` text as one JSON string. Slack shows `text` only in notifications and search when a message has blocks.
 - Slack replaces each newline in `text` with a space when a message has blocks. This was observed in a live test on 2026-09-30. A JSON string has no raw newline, so the exact text survives. The receiver parses the JSON string, then the `A2ANotes/1` text.
 - Text without the data marker goes to the decoder as it is, so an `A2ANotes/1` post without blocks still arrives.
@@ -109,6 +114,8 @@ Every message gets the fixed rules in `src/checks.ts`. Two settings in `config.j
 
 - `reviewCommand`: the content check for both directions. The command reads the subject, the body, and the text of each file as JSON on stdin. It writes `{"verdict": "...", "reason": "..."}`. It can raise the rule verdict but never lower it. A failure gives the verdict `uncertain`.
 - `bodyCheckCommand`: an extra check of outgoing bodies. The command reads the subject, the body, the audience, the instruction, and the list of sentences. It writes `{"flags": [{"text": "<an exact sentence>", "reason": "..."}]}`. A failure adds a flag, so the person must approve the draft.
+
+The body check also returns format warnings in `body_check.warnings`: Markdown headings, tables, images, HTML, nested formatting, `http://` links, Slack markup, mentions, and a body longer than 1,500 characters. Each warning gives the fix. A warning does not change who approves the draft. `a2anotes_create_draft` and `a2anotes_revise_draft` list the warnings in their result text.
 
 The checks read UTF-8 text files, PDF files through `pdftotext`, and DOCX files through `unzip`. When a command does not finish within 1.5 seconds, the draft call returns, and the check finishes in the background. Until then, the draft has no verdict, and nobody can approve it.
 

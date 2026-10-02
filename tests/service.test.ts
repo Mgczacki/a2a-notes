@@ -383,3 +383,38 @@ test('the checks read the text of a DOCX file', () => {
   assert.match(text, /Please wire money now & fast/);
   assert.equal(fileTextForChecks(Buffer.from([0xff, 0xfe, 0x00]), 'x.bin'), '(the file x.bin has no readable text)');
 });
+
+test('a titled body reaches Slack as rich_text with its line breaks, and the wire text keeps the exact body', async () => {
+  const mario = personService(fake, MARIO), alex = personService(fake, ALEX);
+  const body = 'Why you are getting this:\nYou own the Create page.\n\nWhat we need from you:\nPlease review the two pull requests by Friday.\n\nLinks:\n- https://example.test/pull/1\n- https://example.test/pull/2';
+  const d = await mario.service.createDraft(person, { to_address: alex.address, subject: 'Review two pull requests', body, audience: 'person', request_id: rid() });
+  assert.deepEqual(d.body_check!.warnings, []);
+  mario.service.approve(person, { id: d.id, expected_hash: d.hash, decision: 'approve' });
+  await mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() });
+  const posted = [...fake.channels.values()].flatMap(c => c.messages).find(m => m.text.includes(`ID: ${d.id}`))!;
+  const blocks = posted.blocks as any[];
+  assert.deepEqual(blocks.filter(b => b.type === 'rich_text'), [
+    { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: 'Why you are getting this', style: { bold: true } }, { type: 'text', text: '\nYou own the Create page.' }] }] },
+    { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: 'What we need from you', style: { bold: true } }, { type: 'text', text: '\nPlease review the two pull requests by Friday.' }] }] },
+    { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: 'Links', style: { bold: true } }] },
+      { type: 'rich_text_list', style: 'bullet', indent: 0, elements: [
+        { type: 'rich_text_section', elements: [{ type: 'link', url: 'https://example.test/pull/1' }] },
+        { type: 'rich_text_section', elements: [{ type: 'link', url: 'https://example.test/pull/2' }] }] }] },
+  ]);
+  const read = readSlackText(posted.text);
+  assert.ok('text' in read && read.text.includes(`\n\n${body}\nA2ANotes End/1`), 'the wire body is the exact body');
+  await alex.service.scanNow();
+  const got = alex.service.list(person, { direction: 'incoming' }).messages.find(m => m.message_id === d.id)!;
+  assert.equal(alex.service.get(person, got.id).body, body);
+});
+
+test('a draft with a Markdown heading gets a format warning, and the warning does not change the approver', async () => {
+  const mario = personService(fake, MARIO), alex = personService(fake, ALEX);
+  mario.service.setTrusted(person, { address: alex.address, trusted: true });
+  const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Report', body: '## Report\nHi Alex, the report is ready. Please read it.', audience: 'person', request_id: rid() });
+  assert.equal(d.body_flags, 0);
+  assert.equal(d.format_warnings, 1);
+  assert.equal(d.body_check!.warnings![0].code, 'heading');
+  assert.equal(d.approver, 'reviewer');
+  assert.equal(mario.service.reviewMessage(agent, d.id).format_warnings[0].code, 'heading');
+});
