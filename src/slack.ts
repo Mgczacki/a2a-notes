@@ -19,6 +19,9 @@ export interface SlackConfig {
   apiBase?: string; authorizeUrl?: string;
   // test only: allow a message to the signed-in member's own direct message conversation
   allowSelf?: boolean;
+  // Explicit modern bot peers, by full Slack member address. This only enables
+  // transport; it never grants message approval or changes trusted senders.
+  botPeers?: string[];
   // do not renew the access token (for a copied token that another program renews)
   noRefresh?: boolean;
   // how many days of history the first scan of a conversation reads (default 14)
@@ -52,6 +55,9 @@ export class SlackTransport implements Transport {
   constructor(readonly file: string, readonly config: SlackConfig, private fetcher: typeof fetch = fetch) {
     this.apiBase = (config.apiBase || 'https://slack.com/api').replace(/\/$/, '');
     this.projectLink = checkProjectLink(config.projectLink);
+    if (config.botPeers !== undefined && (!Array.isArray(config.botPeers) || config.botPeers.some(address => {
+      try { return parseSlackAddress(address).team !== config.teamId; } catch { return true; }
+    }))) throw new Error('botPeers must contain Slack member addresses in this workspace.');
   }
 
   private credentials(): Credentials | undefined { return existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : undefined; }
@@ -189,7 +195,8 @@ export class SlackTransport implements Transport {
   private person(member: any, team: string): Person {
     return { address: slackAddress(team, String(member.id)), name: String(member.profile?.display_name || member.real_name || member.name || member.id),
       realName: String(member.real_name || member.profile?.real_name || ''), title: String(member.profile?.title || ''),
-      active: !member.deleted && !member.is_bot && !member.is_app_user, ...(member.profile?.email ? { email: String(member.profile.email) } : {}),
+      active: !member.deleted && ((!member.is_bot && !member.is_app_user)
+        || (member.is_bot && !!this.config.botPeers?.includes(slackAddress(team, String(member.id))))), ...(member.profile?.email ? { email: String(member.profile.email) } : {}),
       // the profile picture address that Slack gives; a client downloads it without the Slack token
       ...(/^https:\/\//.test(String(member.profile?.image_192 || member.profile?.image_72 || '')) ? { image: String(member.profile.image_192 || member.profile.image_72) } : {}) };
   }
@@ -317,7 +324,13 @@ export class SlackTransport implements Transport {
           }
           for (const event of found.sort((a, b) => Number(a.ts) - Number(b.ts))) {
             if (Number(event.ts) <= from) continue;
-            const ordinary = !event.subtype || event.subtype === 'thread_broadcast';
+            // Modern bot events have Slack's authenticated member in `user`.
+            // Legacy events without that identity remain excluded. An enabled
+            // bot must be the DM peer; text cannot supply its sender identity.
+            const enabledBot = event.subtype === 'bot_message' && event.bot_id
+              && event.user === conversation.user
+              && this.config.botPeers?.includes(slackAddress(c.team, String(event.user)));
+            const ordinary = !event.subtype || event.subtype === 'thread_broadcast' || enabledBot;
             // this account's own posts in a conversation with another member are sent messages, not received ones
             const own = event.user === c.user && conversation.user !== c.user;
             // a post with a user token through an app has bot_id and app_id; the member in `user` is the sender

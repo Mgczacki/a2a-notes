@@ -138,3 +138,17 @@ Any MCP client can use this service: a command-line agent through `a2a-notes bri
 - The package has no registered Slack app of its own. `a2a-notes init` takes the client ID and team of the Slack app that you use.
 - The fixed body rules flag detail names from the agent file, code names, internal task numbers, local paths, secrets, sender notes, and an ask that differs from the `instruction` input.
 - The first release supports one Slack workspace. It does not send between workspaces.
+
+## Explicit bot peers
+
+To exchange notes with a modern Slack bot such as Guy, a person can add its
+full member address to `slack.botPeers` in local `config.json`, for example
+`["slack:TEXAMPLE:UGUY01"]`. Restart the service after changing configuration.
+Bots remain disabled as recipients by default. Deleted members and other
+workspaces remain excluded. The scan accepts an enabled bot's `bot_message`
+only when Slack supplies its member `user`, its `bot_id`, and a matching DM
+peer. Legacy bot messages without a member identity are excluded.
+
+This enables transport only. Incoming/outgoing checks, trusted-sender policy,
+and person/reviewer approval still apply. An agent cannot enable a bot through
+an MCP tool or use the setting to approve a message.
