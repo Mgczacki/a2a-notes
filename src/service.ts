@@ -55,6 +55,8 @@ export class NotesService {
   readonly transport: Transport;
   private reviewer?: Reviewer;
   private timer?: NodeJS.Timeout;
+  private sendTimer?: NodeJS.Timeout;
+  private draining = false;
   private scanning?: Promise<void>;
   private sending = new Set<string>();
   constructor(private options: ServiceOptions) {
@@ -66,9 +68,10 @@ export class NotesService {
   // After a restart: a message that was sending when the process stopped may or may not be in Slack.
   start() {
     this.store.change(data => {
-      for (const n of data.notes) if (n.direction === 'out' && n.state === 'sending') {
-        n.state = 'delivery_uncertain'; n.error = 'The service stopped during the send. Check status before a retry.';
-        this.store.audit(data, 'service', 'delivery_uncertain', n.id, 'restart during send');
+      for (const n of data.notes) if (n.direction === 'out' && (n.state === 'sending' || n.state === 'delivery_uncertain')) {
+        n.state = 'queued'; n.nextRetryAt = new Date().toISOString();
+        n.error = 'The service stopped during the send. It will check Slack before it sends again.';
+        this.store.audit(data, 'service', 'queued', n.id, 'restart during send');
       }
     });
     const every = this.options.scanIntervalMs ?? 60_000;
@@ -77,8 +80,40 @@ export class NotesService {
       this.timer.unref();
       void this.scanNow().catch(() => {});
     }
+    this.sendTimer = setInterval(() => { void this.processQueue(); }, 1000);
+    this.sendTimer.unref();
+    void this.processQueue();
   }
-  stop() { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+  stop() { if (this.timer) clearInterval(this.timer); if (this.sendTimer) clearInterval(this.sendTimer); this.timer = undefined; this.sendTimer = undefined; }
+
+  private retryDelay(error: unknown, count: number) {
+    if (error instanceof TransportError && error.retryAfter > 0) return error.retryAfter * 1000;
+    return Math.min(60 * 60_000, 60_000 * 2 ** Math.min(count - 1, 6));
+  }
+  private queue(id: string, error: unknown) {
+    this.store.update(id, (n, data) => {
+      n.retryCount = (n.retryCount || 0) + 1;
+      n.nextRetryAt = new Date(Date.now() + this.retryDelay(error, n.retryCount)).toISOString();
+      n.state = 'queued'; n.error = `Delivery will retry: ${(error as Error).message}`;
+      this.store.audit(data, 'service', 'queued', id, n.error);
+    });
+  }
+  async processQueue(now = Date.now()) {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      const due = this.store.read().notes.filter(n => n.direction === 'out' && n.state === 'queued' && Date.parse(n.nextRetryAt || '') <= now);
+      for (const n of due) {
+        try { await this.send({ name: 'service', role: 'reviewer' }, { id: n.id, expected_hash: n.hash, request_id: `retry-${randomUUID()}` }); }
+        catch (error) {
+          if (error instanceof ServiceError && error.code === 'send_in_progress') continue;
+          if (error instanceof ServiceError && ['approval_invalid', 'not_approved', 'hash_changed', 'file_changed'].includes(error.code)) {
+            this.store.update(n.id, (x, data) => { x.state = 'permanent_failure'; delete x.nextRetryAt; x.error = error.message; this.store.audit(data, 'service', 'permanent_failure', n.id, error.message); });
+          } else this.queue(n.id, error);
+        }
+      }
+    } finally { this.draining = false; }
+  }
 
   // ---- policy ----
 
@@ -106,7 +141,7 @@ export class NotesService {
     const approver = this.approverFor(n, data), actions: string[] = [];
     const canApprove = session.role === 'person' ? approver !== 'nobody' : session.role === 'reviewer' && approver === 'reviewer';
     if (n.direction === 'out') {
-      if (['draft', 'approved', 'rejected'].includes(n.state) && this.canEdit(n, session)) actions.push('revise');
+      if (['draft', 'approved', 'rejected', 'permanent_failure'].includes(n.state) && this.canEdit(n, session)) actions.push('revise');
       if (['draft', 'approved'].includes(n.state) && canApprove) actions.push('approve', 'reject');
       if ((n.state === 'approved' && this.approvalValid(n, data) || n.state === 'delivery_uncertain') && this.canSend(n, session)) actions.push('send');
     } else {
@@ -138,6 +173,7 @@ export class NotesService {
       check: n.review ? { verdict: n.review.verdict, reviewer: n.review.reviewer } : null, body_flags: n.bodyCheck?.flags.length ?? null, format_warnings: n.bodyCheck?.warnings?.length ?? null,
       approver: this.approverFor(n, data), approved_by: n.approval && n.approval.hash === n.hash ? n.approval.by : null,
       thread_id: n.threadId, created: n.created, updated: n.updated, seen: !!n.seen, ...(n.failure ? { failure_code: n.failure.code } : {}),
+      next_retry_at: n.nextRetryAt ?? null, sent_at: n.sentAt ?? null,
       metadata: n.metadata ?? null, reply_to_local: this.replyLink(n, data),
       hash: n.hash, allowed_actions: this.allowed(n, data, session),
     };
@@ -339,7 +375,7 @@ export class NotesService {
     const n = data.notes.find(x => x.id === input.id && x.direction === 'out');
     if (!n) throw new ServiceError('not_found', 'No outgoing draft has this ID.');
     if (!this.canEdit(n, session)) throw new ServiceError('forbidden', 'Only the person or the agent that created this draft can revise it.');
-    if (!['draft', 'approved', 'rejected'].includes(n.state)) throw new ServiceError('not_editable', `A message in state ${n.state} cannot change.`);
+    if (!['draft', 'approved', 'rejected', 'permanent_failure'].includes(n.state)) throw new ServiceError('not_editable', `A message in state ${n.state} cannot change.`);
     if (input.expected_hash !== n.hash) throw new ServiceError('hash_changed', 'The draft changed since you read it.', 'Read the draft again and revise the current version.');
     const fields = this.draftFields(data, input, n.messageId);
     const files = [...(fields.agentFile ? [fields.agentFile] : []), ...fields.support];
@@ -439,29 +475,36 @@ export class NotesService {
     if (!this.canSend(n, session)) throw new ServiceError('forbidden', 'An agent session cannot send messages.', 'Ask the person or the review agent to send it.');
     if (input.expected_hash !== n.hash) throw new ServiceError('hash_changed', 'The message changed since you read it.', 'Read it again.');
     if (n.state === 'sent') return this.get(session, id);
+    if (n.state === 'queued' && Date.parse(n.nextRetryAt || '') > Date.now()) return this.get(session, id);
     if (this.sending.has(id) || n.state === 'sending') throw new ServiceError('send_in_progress', 'This message is being sent now.', 'Check its status in a minute.');
+    if (!['approved', 'queued', 'delivery_uncertain'].includes(n.state)) throw new ServiceError('not_approved', 'Approve this message before it is sent.');
+    if (!this.approvalValid(n, data)) throw new ServiceError('approval_invalid', 'The approval does not match the current message or levels.', 'Ask for a new approval.');
+    if (!n.review || n.review.verdict === 'quarantine') throw new ServiceError('not_approved', 'The message has not passed the checks.');
     const identity = this.transport.identity();
     if (!identity) throw new ServiceError('not_connected', 'Sign in to Slack first.');
+    if (identity.address !== n.from) throw new ServiceError('identity_changed', 'The Slack account changed. Connect the account that approved this draft.');
     this.sending.add(id);
     try {
-      if (n.state === 'delivery_uncertain') {
+      if (n.state === 'delivery_uncertain' || n.state === 'queued') {
         // look for the message in the conversation before a second send
-        const found = await this.wrap(() => this.transport.findSent(n.to, n.messageId));
+        let found;
+        try { found = await this.transport.findSent(n.to, n.messageId, n.sendStartedAt); }
+        catch (error) { this.queue(id, error); return this.get(session, id); }
         if (found) {
-          this.store.update(id, (x, d) => { x.state = 'sent'; x.sentAt = new Date().toISOString(); x.transport = { ...x.transport, name: this.transport.name, channel: found.channel, ts: found.ts }; delete x.error; this.store.audit(d, session.name, 'send_found', id); });
+          this.store.update(id, (x, d) => { x.state = 'sent'; x.sentAt = new Date().toISOString(); x.transport = { ...x.transport, name: this.transport.name, channel: found.channel, ts: found.ts }; delete x.error; delete x.nextRetryAt; this.store.audit(d, session.name, 'send_found', id); });
           return this.get(session, id);
         }
-      } else if (n.state !== 'approved') throw new ServiceError('not_approved', 'Approve this message before it is sent.');
+      }
+      data = this.store.read();
       if (!this.approvalValid(n, data)) throw new ServiceError('approval_invalid', 'The approval does not match the current message or levels.', 'Ask for a new approval.');
-      if (!n.review || n.review.verdict === 'quarantine') throw new ServiceError('not_approved', 'The message has not passed the checks.');
       const files = this.files(data, n);
       const bytes = files.map(f => this.store.readFileBytes(f));
       const agentFile = files.find(f => f.kind === 'agent');
-      const senderName = identity.name;
+      const senderName = n.sendName || identity.name;
       this.store.update(id, (x, d) => {
-        if (x.hash !== n.hash || x.approval?.hash !== n.hash) throw new ServiceError('hash_changed', 'The message changed. Approve it again.');
-        x.state = 'sending'; x.sendStartedAt = new Date().toISOString(); delete x.error;
-        d.requests[requestId] = { tool: 'send', id, at: x.sendStartedAt };
+        if (x.hash !== n.hash || !this.approvalValid(x, d)) throw new ServiceError('approval_invalid', 'The approval changed. Approve it again.');
+        x.state = 'sending'; x.sendStartedAt ||= new Date().toISOString(); x.sendName ||= senderName; delete x.error;
+        d.requests[requestId] = { tool: 'send', id, at: new Date().toISOString() };
         this.store.audit(d, session.name, 'send_attempt', id);
       });
       data = this.store.read();
@@ -476,17 +519,17 @@ export class NotesService {
             files: files.filter(f => f.kind === 'support').map(f => ({ name: f.name, size: f.size })) },
         });
       } catch (error) {
-        const definite = error instanceof TransportError && error.definite;
+        const retryable = !(error instanceof TransportError) || !error.definite || error.rateLimited;
+        if (retryable) { this.queue(id, error); return this.get(session, id); }
         this.store.update(id, (x, d) => {
-          x.state = definite ? 'approved' : 'delivery_uncertain';
-          x.error = definite ? `Slack did not post the message: ${(error as Error).message}` : 'Slack did not confirm delivery. Check status before a retry.';
-          this.store.audit(d, 'service', definite ? 'send_failed' : 'delivery_uncertain', id, (error as Error).message);
+          x.state = 'permanent_failure'; delete x.nextRetryAt;
+          x.error = `Slack did not post the message: ${(error as Error).message}`;
+          this.store.audit(d, 'service', 'permanent_failure', id, (error as Error).message);
         });
-        if (definite) throw new ServiceError('send_failed', `The message was not sent: ${(error as Error).message}`, 'Fix the cause and send again.');
-        throw new ServiceError('delivery_uncertain', 'Slack may have posted the message, but it did not confirm.', 'Call a2anotes_send again with the same hash: it checks the conversation before it sends.');
+        throw new ServiceError('send_failed', `The message was not sent: ${(error as Error).message}`, 'Revise the draft and approve the new version.');
       }
       this.store.update(id, (x, d) => {
-        x.state = 'sent'; x.sentAt = new Date().toISOString(); delete x.error;
+        x.state = 'sent'; x.sentAt = new Date().toISOString(); delete x.error; delete x.nextRetryAt;
         x.transport = { ...x.transport, name: this.transport.name, channel: result.channel, ts: result.ts, files: result.files };
         this.store.audit(d, session.name, 'sent', id);
       });

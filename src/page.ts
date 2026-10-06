@@ -54,7 +54,7 @@ async function api(path, body) {
   return data;
 }
 const act = fn => async () => { $('#error').textContent = ''; try { await fn(); await load(); } catch (e) { $('#error').textContent = e.message; } };
-const stateClass = s => ({ sent: 'ok', approved: 'ok', held: 'wait', draft: 'wait', sending: 'info', delivery_uncertain: 'bad', failed: 'bad', quarantined: 'bad', rejected: 'bad' })[s] || 'info';
+const stateClass = s => ({ sent: 'ok', approved: 'ok', held: 'wait', draft: 'wait', queued: 'wait', sending: 'info', delivery_uncertain: 'bad', permanent_failure: 'bad', failed: 'bad', quarantined: 'bad', rejected: 'bad' })[s] || 'info';
 function card(m, trusted) {
   const peer = m.direction === 'in' ? m.from : m.to;
   const actions = el('div', { class: 'row' });
@@ -78,6 +78,8 @@ function card(m, trusted) {
     m.agent_file && m.agent_file.data ? el('details', {}, el('summary', {}, 'Show the agent file'), el('pre', {}, JSON.stringify(m.agent_file.data, null, 2))) : null,
     m.files.length ? el('p', { class: 'small' }, 'Files: ' + m.files.map(f => f.name + ' (' + f.size + ' bytes)').join(', ')) : null,
     m.failure ? el('div', {}, el('p', { class: 'status bad' }, m.failure.code), el('p', {}, m.failure.reason), m.failure.raw ? el('details', {}, el('summary', {}, 'Show the received text'), el('pre', {}, m.failure.raw)) : null) : null,
+    m.next_retry_at ? el('p', { class: 'small' }, 'Next retry: ' + new Date(m.next_retry_at).toLocaleString()) : null,
+    m.state === 'sent' && m.transport ? el('p', { class: 'small' }, 'Sent at ' + (m.sent_at || m.updated)) : null,
     m.error ? el('p', { class: 'small' }, m.error) : null,
     actions);
 }

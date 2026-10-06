@@ -98,7 +98,7 @@ export function createMcpServer(service: NotesService, session: Session, extra: 
     inputSchema: { id: z.string().max(100), expected_hash: z.string().max(64), decision: z.enum(['approve', 'reject']), review_context: z.string().max(1000).optional() },
   }, args => run(() => service.approve(session, args), v => `${v.id} is ${v.state}.`));
 
-  server.registerTool('a2anotes_send', { description: 'Sends an approved draft. On delivery_uncertain, call it again with the same hash: it checks the conversation before a second send.',
+  server.registerTool('a2anotes_send', { description: 'Sends an approved draft. A rate limit or uncertain delivery queues the same approved draft for automatic retry. Read next_retry_at for the next attempt.',
     inputSchema: { id: z.string().max(100), expected_hash: z.string().max(64), request_id: z.string() },
   }, args => run(() => service.send(session, args), v => `${v.id} is ${v.state}.`));
 
