@@ -136,7 +136,7 @@ export class SlackTransport implements Transport {
   }
 
   private async request(method: string, params: Record<string, string>, token?: string): Promise<any> {
-    if (Date.now() < this.blockedUntil) throw new TransportError('Slack rate limit. Try again later.', true, Math.ceil((this.blockedUntil - Date.now()) / 1000));
+    if (Date.now() < this.blockedUntil) throw new TransportError('Slack rate limit. Try again later.', true, Math.ceil((this.blockedUntil - Date.now()) / 1000), true);
     let res: Response | undefined;
     // a read can run again after a network error; a post or upload never runs twice
     for (let attempt = 0; !res; attempt++) {
@@ -148,9 +148,10 @@ export class SlackTransport implements Transport {
       }
     }
     if (res.status === 429) {
-      const retry = Math.max(1, Number(res.headers.get('retry-after')) || 60);
-      this.blockedUntil = Date.now() + retry * 1000;
-      throw new TransportError('Slack rate limit. Try again later.', true, retry);
+      const header = Number(res.headers.get('retry-after'));
+      const retry = res.headers.has('retry-after') && Number.isFinite(header) && header > 0 ? Math.ceil(header) : 0;
+      this.blockedUntil = Date.now() + (retry || 60) * 1000;
+      throw new TransportError('Slack rate limit. Try again later.', true, retry, true);
     }
     if (!res.ok) throw new TransportError(`Slack returned HTTP ${res.status}.`, res.status < 500);
     let data: any;
@@ -266,12 +267,13 @@ export class SlackTransport implements Transport {
     return { channel, ts: String(result.ts), files };
   }
 
-  async findSent(to: string, messageId: string) {
+  async findSent(to: string, messageId: string, since?: string) {
     const c = this.self();
     const channel = await this.openConversation(to);
     let cursor = '';
-    for (let pages = 0; pages < 5; pages++) {
-      const page = await this.call('conversations.history', { channel, limit: '100', ...(cursor ? { cursor } : {}) });
+    for (;;) {
+      const oldest = since ? String(Math.max(0, Math.floor(Date.parse(since) / 1000) - 86400)) : undefined;
+      const page = await this.call('conversations.history', { channel, limit: '100', ...(oldest ? { oldest } : {}), ...(cursor ? { cursor } : {}) });
       const hit = (page.messages || []).find((m: any) => {
         if (m.user !== c.user || typeof m.text !== 'string') return false;
         const read = readSlackText(m.text);

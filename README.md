@@ -89,7 +89,7 @@ A client can attach `metadata` to a draft in `a2anotes_create_draft` and `a2anot
 
 ## Sending and delivery
 
-The service uploads files before it posts the message. A failed upload leaves the draft unsent. The service marks the draft `sending` before it calls `chat.postMessage`. When Slack does not confirm, the state is `delivery_uncertain`. The next `a2anotes_send` call looks for the message ID in the conversation before it posts again. After a restart, a draft in `sending` becomes `delivery_uncertain`.
+The service uploads files before it posts the message. It stores `sending` before the Slack call. A Slack rate limit or an uncertain reply moves the approved draft to `queued`. The stored `next_retry_at` gives the next attempt. The service uses Slack `Retry-After` when Slack sends it. Without that header, the wait starts at 60 seconds and doubles to a maximum of one hour. The service reads queued drafts after a restart. It checks Slack history for the message ID before it posts again. It uses the stored recipient, approved text, and sender name for each retry. It checks the Slack account address against the approved draft. A definite Slack error moves the draft to `permanent_failure`. The person can revise that draft and approve the new version. The review page and message tools show `queued`, `next_retry_at`, `sent`, and `permanent_failure`.
 
 ## Slack display
 

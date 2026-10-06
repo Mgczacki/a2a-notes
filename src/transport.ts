@@ -27,7 +27,7 @@ export interface SendResult { channel: string; ts: string; files: Record<string,
 
 export class TransportError extends Error {
   // definite: the service answered and did not post the message. A timeout or lost reply is not definite.
-  constructor(message: string, readonly definite: boolean, readonly retryAfter = 0) { super(message); }
+  constructor(message: string, readonly definite: boolean, readonly retryAfter = 0, readonly rateLimited = false) { super(message); }
 }
 
 export interface Transport {
@@ -39,7 +39,7 @@ export interface Transport {
   checkRecipient(address: string): Promise<Person>;
   send(input: SendInput): Promise<SendResult>;
   // looks for a message that this account sent with this ID, after a send that may or may not have posted
-  findSent(to: string, messageId: string): Promise<{ channel: string; ts: string } | null>;
+  findSent(to: string, messageId: string, since?: string): Promise<{ channel: string; ts: string } | null>;
   // reads messages newer than each saved cursor, oldest first. handle stores and checks one message; the adapter
   // calls save after handle returns, so a failed message is read again at the next scan.
   scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void): Promise<{ conversations: number; messages: number }>;

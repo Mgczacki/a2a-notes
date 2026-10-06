@@ -9,7 +9,7 @@ import { DEFAULT_POLICY, type Policy } from './policy.ts';
 import type { BodyCheck, ReviewResult } from './checks.ts';
 
 export type Role = 'person' | 'reviewer' | 'agent';
-export type OutState = 'draft' | 'approved' | 'sending' | 'sent' | 'delivery_uncertain' | 'rejected';
+export type OutState = 'draft' | 'approved' | 'queued' | 'sending' | 'sent' | 'delivery_uncertain' | 'permanent_failure' | 'rejected';
 export type InState = 'held' | 'approved' | 'rejected' | 'failed' | 'quarantined';
 
 export interface StoredFile {
@@ -31,6 +31,7 @@ export interface Note {
   transport?: { name: string; channel?: string; ts?: string; threadTs?: string; files?: Record<string, string> };
   failure?: { code: string; reason: string; raw?: string };
   error?: string; seen?: string; created: string; updated: string; sendStartedAt?: string; sentAt?: string;
+  nextRetryAt?: string; retryCount?: number; sendName?: string;
 }
 export type Metadata = Record<string, string | number | boolean | null>;
 export interface Trusted { address: string; name: string; at: string }
