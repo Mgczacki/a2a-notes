@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- `a2anotes_request_approval` asks the human to decide inside an interactive MCP client.
+- The form shows the note and attached file hashes without requiring Taskboard or browser approval.
+- Registered clients can relay human decisions while their agent role retains its limits.
+- HTTP sessions retain client capabilities and correlate form responses with the requesting client.
+- Cancel and missing responses make no decision.
+- Changed content or rules invalidate an open confirmation.
+- Unchanged approved notes keep one approval after retries and restart.
+- Incoming acceptance keeps existing audience and privacy rules.
+
 ## 0.5.0
 
 - Outgoing approval writes a durable queue record before delivery starts.

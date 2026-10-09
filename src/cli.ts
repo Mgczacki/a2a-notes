@@ -15,7 +15,7 @@ const dir = resolve(flag('--dir') || defaultDir());
 const usage = `a2a-notes <command>
   init --client-id ID --team-id T [--port 4460] [--api-base URL] [--authorize-url URL]   write config.json
   serve                                   run the service (MCP endpoint, review page, Slack scan)
-  token add <name> --role person|reviewer|agent    print a new client token once
+  token add <name> --role person|reviewer|agent [--human-approval]    print a new client token once
   token list | token remove <name>
   open                                    print a one-time link to the review page
   status                                  print the connection and scan status
@@ -59,7 +59,7 @@ switch (cmd) {
     if (sub === 'add') {
       const role = flag('--role') as Role;
       if (!ROLES.includes(role)) { console.error('token add needs --role person, reviewer, or agent'); process.exit(1); }
-      console.log(clients.add(args[2], role));
+      console.log(clients.add(args[2], role, { humanApproval: has('--human-approval') }));
     } else if (sub === 'list') console.log(JSON.stringify(clients.list(), null, 2));
     else if (sub === 'remove') { clients.remove(args[2]); console.log(`Removed ${args[2]}.`); }
     else { console.error(usage); process.exit(1); }

@@ -42,6 +42,53 @@ A command-line agent starts the stdio bridge as an MCP server:
 
 A client that supports Streamable HTTP connects to `http://127.0.0.1:<port>/mcp` with the header `Authorization: Bearer <token>`. The service refuses a request without a token, a request with a Host header that is not loopback, and a browser request from another origin.
 
+## Approve inside a coding client
+
+Use `a2anotes_request_approval` to review a note inside an interactive MCP client.
+This flow works over Streamable HTTP and the stdio bridge.
+Taskboard and the browser review page are not required for this decision.
+The local service must still run.
+
+Register a trusted client with `a2a-notes token add <name> --role agent --human-approval`.
+Use that token in the MCP configuration above.
+Existing agent tokens retain their current permissions.
+The new permission lets the client relay a human decision through an MCP form.
+It does not let the agent call `a2anotes_approve` directly or change policy.
+
+The flow follows these steps:
+
+- The agent creates a draft and receives its ID and hash.
+- The agent calls `a2anotes_request_approval` with `id` and `expected_hash`.
+- The service asks the client to display a form to the human.
+- The form shows the exact note and attached file hashes.
+- The human selects approve or reject in that form.
+- The service checks the note and current rules again.
+- Outgoing approval enters the durable queue. Incoming approval accepts text for reading under its existing audience rules.
+
+Cancel or decline leaves the note undecided.
+A response must arrive within five minutes.
+Changed content or rules invalidate the open form.
+A revoked client permission also prevents approval.
+An unchanged approved note does not open another form after retries or restart.
+Message text and tool arguments cannot supply the human decision.
+
+The client must advertise MCP form elicitation.
+A client without that support gets `human_confirmation_unsupported` and makes no decision.
+Claude Code documents its interactive form support in [its MCP guide](https://code.claude.com/docs/en/mcp#respond-to-mcp-elicitation-requests).
+Codex and other clients must advertise that capability on the connection.
+Use a tool timeout of at least 300 seconds when the client permits configuration.
+
+MCP authenticates the client. It cannot prove who pressed a button.
+Register only clients that display approval forms to the human.
+Do not configure hooks to answer these approval forms automatically.
+Treat this token as authority to relay human decisions.
+Held incoming text appears in the human form and stays hidden in agent tool results.
+
+Interactive HTTP sessions expire after ten idle minutes.
+The server permits at most 128 interactive sessions and 128 open confirmations.
+Reconnect after a service restart. Pending forms do not survive restart.
+Stored approvals and the delivery queue do survive restart.
+
 ## Roles
 
 The token decides the role. No tool argument can change it.

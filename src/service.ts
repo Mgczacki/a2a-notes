@@ -13,7 +13,7 @@ import { checkOutgoingBody, fileTextForChecks, review, type BodyCheck, type Body
 import { noteHash, ServiceError, Store, type Data, type Metadata, type Note, type Role, type StoredFile } from './store.ts';
 import { TransportError, type Received, type Transport } from './transport.ts';
 
-export interface Session { name: string; role: Role }
+export interface Session { name: string; role: Role; humanApproval?: boolean }
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 export interface ServiceOptions {
@@ -64,6 +64,7 @@ export class NotesService {
   private scanning?: Promise<void>;
   private sending = new Set<string>();
   private active = new Set<Promise<void>>();
+  private humanApprovals = new Set<string>();
   private stopping = false;
   constructor(private options: ServiceOptions) {
     this.store = options.store;
@@ -134,6 +135,8 @@ export class NotesService {
   }
   private allowed(n: Note, data: Data, session: Session) {
     const approver = this.approverFor(n, data), actions: string[] = [];
+    if ((session.role === 'person' || session.humanApproval) && approver !== 'nobody' &&
+      (n.direction === 'out' ? ['draft', 'approved'].includes(n.state) : n.state === 'held')) actions.push('request_approval');
     const canApprove = session.role === 'person' ? approver !== 'nobody' : session.role === 'reviewer' && approver === 'reviewer';
     if (n.direction === 'out') {
       if (this.editable(n) && this.canEdit(n, session)) actions.push('revise');
@@ -442,8 +445,49 @@ export class NotesService {
       body_flags: open ? n.bodyCheck?.flags ?? [] : [], format_warnings: open ? n.bodyCheck?.warnings ?? [] : [], instruction: n.bodyCheck?.instruction ?? null, approver: this.approverFor(n, data), hash: n.hash };
   }
 
+  // Only a registered human client can receive private text in a confirmation form.
+  // The callback represents the client's human interface, never a tool argument.
+  async requestHumanApproval(session: Session, input: { id: string; expected_hash: string },
+    confirm: (message: ReturnType<NotesService['detail']>) => Promise<'approve' | 'reject' | 'cancel'>) {
+    if (session.role !== 'person' && !session.humanApproval)
+      throw new ServiceError('human_approval_not_enabled', 'This client is not registered for human confirmation.', 'Register a trusted interactive client with token add --role agent --human-approval.');
+    const data = this.store.read(), n = data.notes.find(x => x.id === input.id);
+    if (!n) throw new ServiceError('not_found', 'No message has this ID.');
+    if (n.hash !== input.expected_hash) throw new ServiceError('hash_changed', 'The message changed since you read it.');
+    if (n.approval && this.approvalValid(n, data) && (n.direction === 'in' && n.state === 'approved' || n.direction === 'out' && ['queued', 'sending', 'sent', 'delivery_uncertain', 'permanent_failure'].includes(n.state)))
+      return this.get(session, n.id);
+    if (!(n.direction === 'out' ? ['draft', 'approved'].includes(n.state) : n.state === 'held') || this.approverFor(n, data) === 'nobody')
+      throw new ServiceError('not_approvable', 'This message cannot be decided under the current checks.');
+    const validateContent = (note: Note, records: Data) => {
+      const files = this.files(records, note);
+      if (files.length !== note.fileIds.length + (note.agentFileId ? 1 : 0) || noteHash(note, files) !== input.expected_hash)
+        throw new ServiceError('hash_changed', 'The note content or file records changed.');
+      for (const file of files) this.store.readFileBytes(file);
+    };
+    validateContent(n, data);
+    if (this.humanApprovals.has(n.id)) throw new ServiceError('approval_in_progress', 'A human confirmation is already open for this note.');
+    if (this.humanApprovals.size >= 128) throw new ServiceError('too_many_confirmations', 'Too many human confirmations are open.', 'Finish an open confirmation before requesting another.');
+    const policy = JSON.stringify({ policy: data.policy, trusted: data.trusted });
+    const started = this.now(), state = n.state, hash = n.hash;
+    this.humanApprovals.add(n.id);
+    try {
+      const decision = await confirm(this.detail(n, data, { name: session.name, role: 'person' }));
+      if (decision === 'cancel') return { ...this.get(session, n.id), confirmation: 'cancelled' };
+      if (decision !== 'approve' && decision !== 'reject') throw new ServiceError('invalid_confirmation', 'The client did not return a valid human decision.');
+      if (this.now() - started >= 300_000) throw new ServiceError('confirmation_expired', 'The human confirmation expired.');
+      const current = this.store.read(), latest = current.notes.find(x => x.id === n.id);
+      if (!latest || latest.hash !== hash) throw new ServiceError('hash_changed', 'The message changed while the confirmation was open.');
+      if (latest.state !== state) throw new ServiceError('state_changed', 'Another decision changed this message while the confirmation was open.');
+      if (JSON.stringify({ policy: current.policy, trusted: current.trusted }) !== policy)
+        throw new ServiceError('policy_changed', 'The approval rules changed while the confirmation was open.');
+      validateContent(latest, current);
+      this.approve({ name: `human:${session.name}`, role: 'person' }, { ...input, decision, review_context: `Human confirmation through MCP client ${session.name}.` });
+      return this.get(session, n.id);
+    } finally { this.humanApprovals.delete(n.id); }
+  }
+
   approve(session: Session, input: { id?: unknown; expected_hash?: unknown; decision?: unknown; review_context?: unknown }) {
-    if (session.role === 'agent') throw new ServiceError('forbidden', 'An agent session cannot approve messages.', 'Ask the person to approve it on the review page.');
+    if (session.role === 'agent') throw new ServiceError('forbidden', 'An agent session cannot approve messages.', 'Use a2anotes_request_approval with a registered interactive client, or ask the person to use the review page.');
     if (input.decision !== 'approve' && input.decision !== 'reject') throw new ServiceError('invalid_input', 'decision must be approve or reject.');
     const n = this.store.update(String(input.id), (n, data) => {
       if (input.expected_hash !== n.hash) throw new ServiceError('hash_changed', 'The message changed since you read it.', 'Read it again before you decide.');

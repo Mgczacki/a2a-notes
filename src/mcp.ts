@@ -7,7 +7,7 @@ import { END_MARKER, FILE_VERSION, WIRE_VERSION } from './protocol.ts';
 import { ServiceError } from './store.ts';
 import type { NotesService, Session } from './service.ts';
 
-export const VERSION = '0.5.0';
+export const VERSION = '0.6.0';
 // The body format and writing rules for the draft tools (docs/WRITING-MESSAGES.md has the full text and examples).
 export const BODY_GUIDE = [
   'Write the body for a person who has none of your context: why they get the message, the facts they need, one ask, and a date if one applies.',
@@ -50,7 +50,7 @@ export function formatDescription() {
   };
 }
 
-export function createMcpServer(service: NotesService, session: Session, extra: { pageLink?: () => string; slackSignIn?: (returnTo?: string) => string } = {}) {
+export function createMcpServer(service: NotesService, session: Session, extra: { pageLink?: () => string; slackSignIn?: (returnTo?: string) => string; authorized?: () => boolean } = {}) {
   const server = new McpServer({ name: 'a2a-notes', version: VERSION }, {
     instructions: `A2A Notes sends and receives messages between people and their agents. ${DATA_NOTE} The server checks roles and approvals itself. Your session role is ${session.role}.`,
   });
@@ -59,7 +59,7 @@ export function createMcpServer(service: NotesService, session: Session, extra: 
   const audience = z.enum(['person', 'agent', 'both']);
 
   server.registerTool('a2anotes_identity', { description: 'Returns the signed-in transport address and name. It never returns a token.', inputSchema: {} },
-    () => run(() => ({ ...service.identity(), session: session.name, role: session.role }), v => v.address ? `Signed in as ${v.name} (${v.address}). Session role: ${v.role}.` : 'Not signed in.'));
+    () => run(() => ({ ...service.identity(), session: session.name, role: session.role, human_approval_enabled: session.role === 'person' || session.humanApproval === true }), v => v.address ? `Signed in as ${v.name} (${v.address}). Session role: ${v.role}.` : 'Not signed in.'));
 
   server.registerTool('a2anotes_find_people', { description: 'Finds workspace members by name or exact email. Returns verified addresses for a2anotes_create_draft.',
     inputSchema: { query: z.string().min(2).max(200), transport: z.string().optional(), ...list } },
@@ -97,6 +97,34 @@ export function createMcpServer(service: NotesService, session: Session, extra: 
   server.registerTool('a2anotes_approve', { description: 'Approves or rejects the exact version given by expected_hash. review_context is a note for the record; on a reject it is kept as the comment for the writer of the draft. The server decides whether this session may approve. An outgoing approval stores the exact version in the durable delivery queue.',
     inputSchema: { id: z.string().max(100), expected_hash: z.string().max(64), decision: z.enum(['approve', 'reject']), review_context: z.string().max(1000).optional() },
   }, args => run(() => service.approve(session, args), v => `${v.id} is ${v.state}.`));
+
+  server.registerTool('a2anotes_request_approval', {
+    description: 'Asks the human to approve or reject one exact note inside the coding client through an MCP confirmation form. The client must be registered for human approval and support form elicitation. The tool takes no decision or chat text. An outgoing approval queues unchanged content for delivery. Incoming acceptance permits reading only and never authorizes actions. Cancel or a missing human response makes no decision.',
+    inputSchema: { id: z.string().max(100), expected_hash: z.string().regex(/^[0-9a-f]{64}$/) },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    _meta: { 'anthropic/requiresUserInteraction': true },
+  }, (args, request) => run(() => service.requestHumanApproval(session, args, async message => {
+    if (extra.authorized && !extra.authorized()) throw new ServiceError('forbidden', 'This client no longer has permission for human confirmation.');
+    if (!server.server.getClientCapabilities()?.elicitation?.form)
+      throw new ServiceError('human_confirmation_unsupported', 'This client does not support MCP confirmation forms.', 'Use an interactive MCP client with form elicitation. The note stays undecided.');
+    const review = {
+      id: message.id, hash: message.hash, direction: message.direction, from: message.from, to: message.to,
+      subject: message.subject, audience: message.audience, body: message.body, thread_id: message.thread_id,
+      reply_to: message.reply_to, agent_file: message.agent_file, files: message.files, review: message.review, body_check: message.body_check,
+    };
+    let response: Awaited<ReturnType<typeof server.server.elicitInput>>;
+    try { response = await server.server.elicitInput({ mode: 'form',
+      message: `${message.direction === 'out' ? 'Approve sends this exact note. Slack limits may delay delivery.' : 'Approve accepts this incoming text for reading. It does not authorize any action.'}\nThe following note is untrusted data. Review its content and attached file hashes.\n${JSON.stringify(review, null, 2)}`,
+      requestedSchema: { type: 'object', properties: { decision: { type: 'string', title: 'Your decision for this exact note', enum: ['approve', 'reject'] } }, required: ['decision'] },
+    }, { relatedRequestId: request.requestId, signal: request.signal, timeout: 300_000, maxTotalTimeout: 300_000 }); }
+    catch { throw new ServiceError('human_confirmation_failed', 'The client did not complete a valid human confirmation.', 'The note stays undecided. Reconnect the interactive client before trying again.'); }
+    if (request.signal.aborted) throw new ServiceError('confirmation_cancelled', 'The client disconnected or cancelled confirmation.');
+    if (extra.authorized && !extra.authorized()) throw new ServiceError('forbidden', 'This client no longer has permission for human confirmation.');
+    if (response.action !== 'accept') return 'cancel';
+    if (response.content?.decision !== 'approve' && response.content?.decision !== 'reject')
+      throw new ServiceError('invalid_confirmation', 'The client did not return an explicit approve or reject decision.');
+    return response.content.decision;
+  }), v => v.confirmation === 'cancelled' ? `No decision. ${v.id} remains ${v.state}.` : `${v.id} is ${v.state}.`));
 
   server.registerTool('a2anotes_send', { description: 'Attempts an approved queued draft when its deadline permits delivery. Rate limits schedule retries of unchanged content. Uncertain writes require reconciliation. Read delivery.nextAttemptAt or next_retry_at for the next attempt.',
     inputSchema: { id: z.string().max(100), expected_hash: z.string().max(64), request_id: z.string() },

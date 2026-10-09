@@ -1,7 +1,9 @@
 // The local HTTP server: the Streamable HTTP MCP endpoint (/mcp), the review page (/), the page's JSON API (/api),
 // and the Slack sign-in redirect (/slack/callback). It listens on loopback only and accepts only loopback Host headers.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createHash, randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createMcpServer, VERSION } from './mcp.ts';
 import { reviewPage } from './page.ts';
 import { ServiceError } from './store.ts';
@@ -31,6 +33,14 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
   let base = `http://${host}:${port}`;
   const loopback = (value: string | undefined) => !!value && /^(?:127\.0\.0\.1|localhost|\[::1\]):\d+$/.test(value);
   const pageLink = () => `${base}/login?code=${clients.loginCode()}`;
+  const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: ReturnType<typeof createMcpServer>; authorization: string; lastUsed: number }>();
+  const authHash = (authorization: string) => createHash('sha256').update(authorization).digest('hex');
+  const expireSessions = setInterval(() => {
+    for (const [id, entry] of sessions) if (Date.now() - entry.lastUsed > 600_000) {
+      sessions.delete(id); void entry.server.close();
+    }
+  }, 60_000);
+  expireSessions.unref();
 
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || '/', base);
@@ -42,9 +52,35 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
     if (url.pathname === '/mcp') {
       const session = clients.session(req.headers.authorization);
       if (!session) return send(res, 401, { jsonrpc: '2.0', error: { code: -32001, message: 'A valid A2A Notes client token is required.' }, id: null }, { 'www-authenticate': 'Bearer' });
-      if (req.method !== 'POST') return send(res, 405, { jsonrpc: '2.0', error: { code: -32000, message: 'This server is stateless. Use POST.' }, id: null }, { allow: 'POST' });
+      const sessionId = req.headers['mcp-session-id'];
+      if (sessionId) {
+        const entry = typeof sessionId === 'string' ? sessions.get(sessionId) : undefined;
+        if (!entry || entry.authorization !== authHash(req.headers.authorization!))
+          return send(res, 404, { jsonrpc: '2.0', error: { code: -32000, message: 'Reconnect this MCP client. Its session is unknown or expired.' }, id: null });
+        entry.lastUsed = Date.now();
+        await entry.transport.handleRequest(req, res, req.method === 'POST' ? await readBody(req) : undefined);
+        return;
+      }
+      if (req.method !== 'POST') return send(res, 405, { jsonrpc: '2.0', error: { code: -32000, message: 'Initialize with POST first.' }, id: null }, { allow: 'POST' });
       const body = await readBody(req);
-      const server = createMcpServer(service, session, { pageLink, ...(options.slack ? { slackSignIn: (returnTo?: string) => options.slack!.beginSignIn(returnTo) } : {}) });
+      const authorization = req.headers.authorization!;
+      const server = createMcpServer(service, session, { pageLink, authorized: () => {
+        const current = clients.session(authorization);
+        return !!current && current.name === session.name && current.role === session.role && current.humanApproval === session.humanApproval;
+      }, ...(options.slack ? { slackSignIn: (returnTo?: string) => options.slack!.beginSignIn(returnTo) } : {}) });
+      // Interactive clients need a persistent connection for the form response.
+      // Existing clients retain the stateless endpoint and its JSON responses.
+      if (isInitializeRequest(body) && body.params.capabilities.elicitation?.form && (session.humanApproval || session.role === 'person')) {
+        if (sessions.size >= 128) { await server.close(); return send(res, 503, { error: { code: 'too_many_sessions', reason: 'Close an unused MCP client and reconnect.' } }); }
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID,
+          onsessioninitialized: id => { sessions.set(id, { transport, server, authorization: authHash(authorization), lastUsed: Date.now() }); },
+          onsessionclosed: id => { sessions.delete(id); void server.close(); },
+        });
+        await server.connect(transport);
+        await transport.handleRequest(req, res, body);
+        if (!transport.sessionId) await server.close();
+        return;
+      }
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => { void transport.close(); void server.close(); });
       await server.connect(transport);
@@ -123,6 +159,11 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
       send(res, e.code === 'not_found' ? 404 : e.code === 'forbidden' ? 403 : 400, { error: { code: e.code, reason: e.message, next: e.next } });
     });
   }) as Server & { url: string };
+  server.once('close', () => {
+    clearInterval(expireSessions);
+    for (const entry of sessions.values()) void entry.server.close();
+    sessions.clear();
+  });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
