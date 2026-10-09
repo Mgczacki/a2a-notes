@@ -38,12 +38,26 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const config = { ...readConfig(dir), ...overrides };
   const lockFile = join(dir, 'service.lock');
+  const recordFile = join(dir, 'service.json');
+  if (!existsSync(lockFile) && existsSync(recordFile)) {
+    const pid = JSON.parse(readFileSync(recordFile, 'utf8')).pid;
+    if (Number.isInteger(pid) && pid > 0) {
+      try { process.kill(pid, 0); throw new Error('An A2A Notes service already owns this data folder.'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+    }
+  }
   if (existsSync(lockFile)) {
     const pid = Number(readFileSync(lockFile, 'utf8'));
     if (!Number.isInteger(pid) || pid <= 0) throw new Error('The service lock has no valid owner. Check the data folder.');
     try { process.kill(pid, 0); throw new Error('An A2A Notes service already owns this data folder.'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
-    unlinkSync(lockFile);
+    const recoveryFile = join(dir, 'service-recovery.lock');
+    const recovery = openSync(recoveryFile, 'wx', 0o600);
+    try {
+      // Another process can claim the store while this process checks the old owner.
+      if (readFileSync(lockFile, 'utf8') !== String(pid)) throw new Error('The service owner changed. Try again.');
+      unlinkSync(lockFile);
+    } finally { closeSync(recovery); unlinkSync(recoveryFile); }
   }
   const fd = openSync(lockFile, 'wx', 0o600);
   try { writeFileSync(fd, String(process.pid)); fsyncSync(fd); } finally { closeSync(fd); }
@@ -68,9 +82,9 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
       close: async () => {
         await service!.stop();
         return new Promise(resolve => {
-        try { unlinkSync(join(dir, 'service.json')); } catch { /* already removed */ }
-        server.closeAllConnections();
-        server.close(() => { try { unlinkSync(lockFile); } catch { /* already removed */ } resolve(); });
+          try { unlinkSync(join(dir, 'service.json')); } catch { /* already removed */ }
+          server.closeAllConnections();
+          server.close(() => { try { unlinkSync(lockFile); } catch { /* already removed */ } resolve(); });
         });
       },
     };

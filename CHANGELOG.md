@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0
+
+- Outgoing approval writes a durable queue record before delivery starts.
+- Slack 429 responses record their method and requested wait.
+- Later rate limits use capped exponential backoff with jitter.
+- Retry status shows the next attempt and final failure.
+- Saved upload progress prevents duplicate file shares after retries and restart.
+- Uncertain delivery triggers reconciliation instead of another post.
+- History pagination resumes after a 429 or restart.
+- Explicit human replies preserve the original audience and verified sender.
+- Ordinary Slack text supplies no instruction or action approval.
+- The service checks policy versions against stored approvals.
+- Existing queue records retain their saved deadline during upgrade.
+- A data folder permits one service process.
+
 ## 0.4.0 (2026-10-02)
 
 - The Slack adapter shows the body as `rich_text` blocks. Version 0.3.0 put the body in `plain_text` section blocks, and the Slack desktop app showed those blocks as one paragraph without line breaks.

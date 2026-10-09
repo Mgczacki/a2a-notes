@@ -251,3 +251,42 @@ test('revising a queued note before its first attempt cancels its approval and d
   assert.equal(changed.state, 'draft'); assert.equal(changed.approval, null); assert.equal(changed.delivery, null);
   await f.owner.service.processQueue(); assert.equal(f.posts().length, 0);
 });
+
+test('history pagination survives a 429 and restart while checking an uncertain post', async t => {
+  const f = await fixture(t), d = await f.draft(); f.approve(d);
+  f.fake.fail('chat.postMessage', { mode: 'lost', count: 1 }); await assert.rejects(f.send(d));
+  for (let i = 0; i < 150; i++) f.fake.inject(ALEX, MARIO, 'Ordinary chat');
+  f.fake.fail('conversations.history', { mode: 'ratelimit', count: 1, retryAfter: 30, after: 1 });
+  const waiting = await f.next(d); assert.equal(waiting.state, 'delivery_uncertain');
+  assert.ok(f.owner.service.store.note(d.id)!.checkpoint!.reconcileCursor);
+  f.restart(); assert.equal((await f.next(d)).state, 'sent');
+  assert.equal(f.fake.calls.get('conversations.history'), 3); assert.equal(f.posts().length, 1);
+});
+
+test('a legacy queue resumes the saved deadline and checks uncertain earlier writes', async t => {
+  const f = await fixture(t), d = await f.draft(); f.approve(d);
+  f.owner.service.store.update(d.id, n => { delete n.delivery; n.nextRetryAt = new Date(f.clock() + 30_000).toISOString(); n.retryCount = 2; });
+  f.restart(); assert.equal(f.owner.service.get(person, d.id).next_retry_at, new Date(f.clock() + 30_000).toISOString());
+  await f.owner.service.processQueue(); assert.equal(f.posts().length, 0);
+  assert.equal((await f.next(d)).state, 'sent');
+  const e = await f.draft(); f.approve(e);
+  f.owner.service.store.update(e.id, n => { delete n.delivery; n.sendStartedAt = new Date(f.clock()).toISOString(); n.nextRetryAt = new Date(f.clock()).toISOString(); });
+  f.restart(); await f.owner.service.processQueue();
+  assert.equal(f.owner.service.get(person, e.id).state, 'delivery_uncertain'); assert.equal(f.posts().length, 1);
+});
+
+test('one service owns a data folder and graceful shutdown releases that folder', async t => {
+  const { startService } = await import('../src/daemon.ts');
+  const { mkdtempSync, existsSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { savePrivate } = await import('../src/store.ts');
+  const fake = await fakeWorkspace(), dir = mkdtempSync(join(tmpdir(), 'a2a-lock-'));
+  savePrivate(join(dir, 'config.json'), { port: 0, scanIntervalSeconds: 0, slack: { clientId: 'fake', teamId: fake.team, redirectUri: 'http://localhost:4460/slack/callback', apiBase: `${fake.url}/api` } });
+  savePrivate(join(dir, 'slack-credentials.json'), fake.credentials(MARIO));
+  let running = await startService(dir);
+  t.after(async () => { await running.close(); await fake.close(); });
+  await assert.rejects(startService(dir), /already owns/);
+  await running.close(); assert.equal(existsSync(join(dir, 'service.lock')), false);
+  running = await startService(dir); assert.ok(running.server.url);
+});

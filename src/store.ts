@@ -23,7 +23,7 @@ export interface Delivery {
   stoppedAt?: string; failureCode?: string; uncertain?: boolean;
 }
 export interface SendCheckpoint {
-  channel?: string; postStarted?: boolean;
+  channel?: string; postStarted?: boolean; reconcileCursor?: string;
   uploads: Record<string, { fileId: string; url: string; phase: 'allocated' | 'uploaded' | 'completing' | 'complete' }>;
 }
 export interface Note {

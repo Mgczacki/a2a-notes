@@ -136,7 +136,7 @@ export class NotesService {
     const approver = this.approverFor(n, data), actions: string[] = [];
     const canApprove = session.role === 'person' ? approver !== 'nobody' : session.role === 'reviewer' && approver === 'reviewer';
     if (n.direction === 'out') {
-      if (((['draft', 'approved', 'rejected'].includes(n.state) || n.state === 'permanent_failure' && !n.delivery?.uncertain && !Object.values(n.checkpoint?.uploads || {}).some(u => u.phase === 'completing')) || n.state === 'queued' && n.delivery?.attempts === 0) && this.canEdit(n, session)) actions.push('revise');
+      if (this.editable(n) && this.canEdit(n, session)) actions.push('revise');
       if (['draft', 'approved'].includes(n.state) && canApprove) actions.push('approve', 'reject');
       if ((n.state === 'approved' && this.approvalValid(n, data) || n.state === 'delivery_uncertain' && !n.delivery) && this.canSend(n, session)) actions.push('send');
     } else {
@@ -145,6 +145,12 @@ export class NotesService {
       actions.push('mark_seen');
     }
     return actions;
+  }
+  private editable(n: Note) {
+    if (['draft', 'approved', 'rejected'].includes(n.state)) return true;
+    if (n.state === 'queued') return n.delivery?.attempts === 0;
+    return n.state === 'permanent_failure' && !n.delivery?.uncertain &&
+      !Object.values(n.checkpoint?.uploads || {}).some(u => u.phase === 'completing');
   }
   private canEdit(n: Note, session: Session) { return session.role === 'person' || n.createdBy?.session === session.name; }
   // the design lets an agent write and revise drafts; only the person or the review agent sends
@@ -372,7 +378,7 @@ export class NotesService {
     if (!n) throw new ServiceError('not_found', 'No outgoing draft has this ID.');
     if (this.sending.has(n.id)) throw new ServiceError('send_in_progress', 'This note is being sent.');
     if (!this.canEdit(n, session)) throw new ServiceError('forbidden', 'Only the person or the agent that created this draft can revise it.');
-    if (!(['draft', 'approved', 'rejected'].includes(n.state) || n.state === 'permanent_failure' && !n.delivery?.uncertain && !Object.values(n.checkpoint?.uploads || {}).some(u => u.phase === 'completing')) && !(n.state === 'queued' && n.delivery?.attempts === 0)) throw new ServiceError('not_editable', `A message in state ${n.state} cannot change.`);
+    if (!this.editable(n)) throw new ServiceError('not_editable', `A message in state ${n.state} cannot change.`);
     if (input.expected_hash !== n.hash) throw new ServiceError('hash_changed', 'The draft changed since you read it.', 'Read the draft again and revise the current version.');
     const fields = this.draftFields(data, input, n.messageId);
     const files = [...(fields.agentFile ? [fields.agentFile] : []), ...fields.support];
@@ -536,7 +542,13 @@ export class NotesService {
         this.store.audit(d, delivery.actor, 'send_attempt', id);
       });
       if (delivery.uncertain || n.checkpoint?.postStarted) {
-        const found = await this.transport.findSent(n.to, n.messageId, n.sendStartedAt);
+        const found = await this.transport.findSent(n.to, n.messageId, n.sendStartedAt, {
+          cursor: n.checkpoint?.reconcileCursor,
+          save: cursor => this.store.update(id, x => {
+            x.checkpoint ||= { uploads: {}, postStarted: true };
+            x.checkpoint.reconcileCursor = cursor;
+          }),
+        });
         if (found) {
           this.store.update(id, (x, d) => {
             x.state = 'sent'; x.sentAt = this.at(); delete x.error; delete x.delivery!.nextAttemptAt;

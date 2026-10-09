@@ -49,7 +49,7 @@ export interface Transport {
   checkRecipient(address: string): Promise<Person>;
   send(input: SendInput): Promise<SendResult>;
   // looks for a message that this account sent with this ID, after a send that may or may not have posted
-  findSent(to: string, messageId: string, since?: string): Promise<{ channel: string; ts: string } | null>;
+  findSent(to: string, messageId: string, since?: string, progress?: { cursor?: string; save: (cursor?: string) => void }): Promise<{ channel: string; ts: string } | null>;
   // reads messages newer than each saved cursor, oldest first. handle stores and checks one message; the adapter
   // calls save after handle returns, so a failed message is read again at the next scan.
   scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void, threads?: { channel: string; ts: string }[]): Promise<{ conversations: number; messages: number }>;

@@ -7,7 +7,7 @@ import { END_MARKER, FILE_VERSION, WIRE_VERSION } from './protocol.ts';
 import { ServiceError } from './store.ts';
 import type { NotesService, Session } from './service.ts';
 
-export const VERSION = '0.4.0';
+export const VERSION = '0.5.0';
 // The body format and writing rules for the draft tools (docs/WRITING-MESSAGES.md has the full text and examples).
 export const BODY_GUIDE = [
   'Write the body for a person who has none of your context: why they get the message, the facts they need, one ask, and a date if one applies.',
@@ -94,11 +94,11 @@ export function createMcpServer(service: NotesService, session: Session, extra: 
   server.registerTool('a2anotes_review_message', { description: 'Returns the check verdict, the reason, and who may approve. It cannot approve or send.', inputSchema: idShape },
     args => run(() => service.reviewMessage(session, args.id), v => `Verdict ${v.verdict}. Approver: ${v.approver}.`));
 
-  server.registerTool('a2anotes_approve', { description: 'Approves or rejects the exact version given by expected_hash. review_context is a note for the record; on a reject it is kept as the comment for the writer of the draft. The server decides whether this session may approve.',
+  server.registerTool('a2anotes_approve', { description: 'Approves or rejects the exact version given by expected_hash. review_context is a note for the record; on a reject it is kept as the comment for the writer of the draft. The server decides whether this session may approve. An outgoing approval stores the exact version in the durable delivery queue.',
     inputSchema: { id: z.string().max(100), expected_hash: z.string().max(64), decision: z.enum(['approve', 'reject']), review_context: z.string().max(1000).optional() },
   }, args => run(() => service.approve(session, args), v => `${v.id} is ${v.state}.`));
 
-  server.registerTool('a2anotes_send', { description: 'Sends an approved draft. A rate limit or uncertain delivery queues the same approved draft for automatic retry. Read next_retry_at for the next attempt.',
+  server.registerTool('a2anotes_send', { description: 'Attempts an approved queued draft when its deadline permits delivery. Rate limits schedule retries of unchanged content. Uncertain writes require reconciliation. Read delivery.nextAttemptAt or next_retry_at for the next attempt.',
     inputSchema: { id: z.string().max(100), expected_hash: z.string().max(64), request_id: z.string() },
   }, args => run(() => service.send(session, args), v => `${v.id} is ${v.state}.`));
 

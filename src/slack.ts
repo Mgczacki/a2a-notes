@@ -8,7 +8,7 @@ import { checkProjectLink, slackBlocks, slackText, readSlackText, MAX_SLACK_TEXT
 
 export const REQUIRED_SCOPES = ['chat:write', 'im:write', 'im:read', 'im:history', 'users:read'];
 export const OPTIONAL_SCOPES = ['users:read.email', 'files:read', 'files:write'];
-// Slack allows about 50 conversations.history calls a minute; a scan every 60 seconds reads at most 40 conversations
+// A scan reads at most 40 conversations. Slack applies each method quota to the app and workspace.
 const MAX_CONVERSATIONS_PER_SCAN = 40;
 const READS = new Set(['auth.test', 'conversations.history', 'conversations.replies', 'conversations.list', 'files.info', 'users.info', 'users.list', 'users.lookupByEmail']);
 
@@ -143,6 +143,10 @@ export class SlackTransport implements Transport {
     const channelKey = `${key}:${params.channel || ''}`;
     const until = Math.max(this.limits[key] || 0, method === 'chat.postMessage' ? this.limits[channelKey] || 0 : 0);
     if (this.now() < until) throw new TransportError(`Slack rate limit for ${method}.`, true, Math.ceil((until - this.now()) / 1000), method, 0);
+    if (method === 'chat.postMessage') {
+      this.limits[channelKey] = this.now() + 1000;
+      savePrivate(this.file + '.limits.json', this.limits);
+    }
     let res: Response | undefined;
     // a read can run again after a network error; a post or upload never runs twice
     for (let attempt = 0; !res; attempt++) {
@@ -164,10 +168,6 @@ export class SlackTransport implements Transport {
     let data: any;
     try { data = await res.json(); } catch { throw new TransportError(`Slack returned a reply to ${method} that is not JSON.`, false, 0, method, res.status); }
     if (!data.ok) throw new TransportError(`Slack: ${String(data.error || 'request failed').replace(/[^a-z_.]/g, '').slice(0, 80)}`, !['internal_error', 'fatal_error', 'request_timeout'].includes(data.error), 0, method, res.status);
-    if (method === 'chat.postMessage') {
-      this.limits[channelKey] = this.now() + 1000;
-      savePrivate(this.file + '.limits.json', this.limits);
-    }
     return data;
   }
   get rateLimitedUntil() {
@@ -316,10 +316,10 @@ export class SlackTransport implements Transport {
     return { channel, ts: String(result.ts), files };
   }
 
-  async findSent(to: string, messageId: string, since?: string) {
+  async findSent(to: string, messageId: string, since?: string, progress?: { cursor?: string; save: (cursor?: string) => void }) {
     const c = this.self();
     const channel = await this.openConversation(to);
-    let cursor = '';
+    let cursor = progress?.cursor || '';
     for (let pages = 0; pages < 1000; pages++) {
       const oldest = since ? String(Math.max(0, Math.floor(Date.parse(since) / 1000) - 86400)) : undefined;
       const page = await this.call('conversations.history', { channel, limit: '100', ...(oldest ? { oldest } : {}), ...(cursor ? { cursor } : {}) });
@@ -329,8 +329,9 @@ export class SlackTransport implements Transport {
         const read = readSlackText(m.text);
         return 'text' in read && read.text.split('\n', 2)[1] === `ID: ${messageId}`;
       });
-      if (hit) return { channel, ts: String(hit.ts) };
+      if (hit) { progress?.save(); return { channel, ts: String(hit.ts) }; }
       cursor = page.response_metadata?.next_cursor || '';
+      progress?.save(cursor || undefined);
       if (!cursor) return null;
     }
     throw new TransportError('Slack history is incomplete. Delivery remains uncertain.', false, 0, 'conversations.history');
@@ -351,20 +352,20 @@ export class SlackTransport implements Transport {
     for (const root of roots.slice(0, MAX_CONVERSATIONS_PER_SCAN)) {
       const key = threadKey(root), scanAt = (Date.now() / 1000).toFixed(6);
       try {
-      let cursor = '';
-      do {
-        const page = await this.call('conversations.replies', { channel: root.channel, ts: root.ts, oldest: cursors[key] || root.ts, latest: scanAt, limit: '100', ...(cursor ? { cursor } : {}) });
-        for (const event of (page.messages || []).sort((a: any, b: any) => Number(a.ts) - Number(b.ts))) {
-          if (Number(event.ts) <= Number(cursors[key] || root.ts) || event.ts === root.ts || event.user === c.user || !event.user || typeof event.text !== 'string' || event.subtype && event.subtype !== 'thread_broadcast') continue;
-          const read = readSlackText(event.text);
-          await handle({ conversation: `slack:${c.team}:${root.channel}`, ref: `slack:${c.team}:${root.channel}:${event.ts}`,
-            ts: String(event.ts), channel: root.channel, sender: slackAddress(c.team, String(event.user)), automated: !!(event.app_id || event.bot_id),
-            text: 'text' in read ? read.text : event.text, ...('error' in read ? { error: read.error } : {}), threadTs: root.ts });
-          save(key, String(event.ts));
-        }
-        cursor = page.response_metadata?.next_cursor || '';
-      } while (cursor);
-      save(key, scanAt);
+        let cursor = '';
+        do {
+          const page = await this.call('conversations.replies', { channel: root.channel, ts: root.ts, oldest: cursors[key] || root.ts, latest: scanAt, limit: '100', ...(cursor ? { cursor } : {}) });
+          for (const event of (page.messages || []).sort((a: any, b: any) => Number(a.ts) - Number(b.ts))) {
+            if (Number(event.ts) <= Number(cursors[key] || root.ts) || event.ts === root.ts || event.user === c.user || !event.user || typeof event.text !== 'string' || event.subtype && event.subtype !== 'thread_broadcast') continue;
+            const read = readSlackText(event.text);
+            await handle({ conversation: `slack:${c.team}:${root.channel}`, ref: `slack:${c.team}:${root.channel}:${event.ts}`,
+              ts: String(event.ts), channel: root.channel, sender: slackAddress(c.team, String(event.user)), automated: !!(event.app_id || event.bot_id),
+              text: 'text' in read ? read.text : event.text, ...('error' in read ? { error: read.error } : {}), threadTs: root.ts });
+            save(key, String(event.ts));
+          }
+          cursor = page.response_metadata?.next_cursor || '';
+        } while (cursor);
+        save(key, scanAt);
       } catch (error) {
         if (error instanceof TransportError && /^Slack: (thread_not_found|channel_not_found|not_in_channel|access_denied)$/.test(error.message)) continue;
         throw error;

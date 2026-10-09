@@ -89,7 +89,55 @@ A client can attach `metadata` to a draft in `a2anotes_create_draft` and `a2anot
 
 ## Sending and delivery
 
-The service uploads files before it posts the message. It stores `sending` before the Slack call. A Slack rate limit or an uncertain reply moves the approved draft to `queued`. The stored `next_retry_at` gives the next attempt. The service uses Slack `Retry-After` when Slack sends it. Without that header, the wait starts at 60 seconds and doubles to a maximum of one hour. The service reads queued drafts after a restart. It checks Slack history for the message ID before it posts again. It uses the stored recipient, approved text, and sender name for each retry. It checks the Slack account address against the approved draft. A definite Slack error moves the draft to `permanent_failure`. The person can revise that draft and approve the new version. The review page and message tools show `queued`, `next_retry_at`, `sent`, and `permanent_failure`.
+An outgoing approval stores the note as `queued` before any network write. The worker reads that state after restart. `a2anotes_send` attempts a queued note when its saved deadline permits delivery.
+
+The first Slack 429 sets the next attempt from `Retry-After`. Later 429 responses use capped exponential backoff with jitter. The backoff cap is 300 seconds. `Retry-After` can require a longer wait. Eight failed attempts stop delivery in `permanent_failure`. A local quota wait does not consume that attempt limit.
+
+Each note exposes its `delivery` record. That record includes these fields:
+
+- `nextAttemptAt`: the next permitted attempt time.
+- `lastMethod`: the Slack method that failed or required a local wait.
+- `lastStatus`: the HTTP status. Zero means the adapter delayed the call locally.
+- `lastRetryAfter`: Slack's requested wait, in seconds.
+- `lastRequestId`: Slack's request ID, when available.
+- `stoppedAt`: the time of the final failure.
+- `failureCode`: the final failure code.
+- `uncertain`: Slack may have accepted the message.
+
+`next_retry_at` remains an alias for the next attempt time. Existing `sent_at` and `permanent_failure` fields retain their meanings.
+
+The worker checks the current policy before each attempt. It checks the sender address and each approved file hash. Invalid credentials stop delivery. Changed content stops delivery. The service does not ask for another approval of unchanged queued text.
+
+The adapter saves an upload ticket before sending file bytes. It saves `completing` before sharing the file. A retry reuses that Slack file ID. An uncertain share requires `files.info` to confirm the share. The adapter never repeats an uncertain file share.
+
+The adapter saves `postStarted` before `chat.postMessage`. After an uncertain post, it searches for the same message ID. It saves each history cursor, so a 429 or restart resumes the search. It does not post again while delivery remains uncertain. A missing confirmation can therefore end in a final uncertain failure.
+
+Slack cooldowns use the configured Slack client ID and workspace ID for each Web API method. Message posting also reserves one second for each channel. A cooldown for one method does not block other methods.
+
+The service permits one process to own each data folder. Graceful shutdown waits for active requests. Existing queue records retain their saved deadline during upgrade. A legacy interrupted send requires reconciliation because its store has no upload checkpoints.
+
+## Explicit human replies in Slack
+
+The Slack footer displays the exact first line for a reply. A person can submit that line in the direct message conversation or its thread.
+
+```text
+A2A Reply/1 8a5f74c0-5c03-4d97-b4e6-3e72842cfa11
+Yes, Friday works.
+```
+
+The UUID identifies the original note. The receiver verifies these facts before linking the reply:
+
+- Slack identifies the sender as the original recipient.
+- The original note has confirmed delivery.
+- The reply arrives in the original direct message conversation.
+- Any thread reference matches the original Slack thread.
+
+The stored reply has `source: human_reply`. It retains the original audience. It contains human text and no generated agent request. It receives the usual incoming content check and approval requirements. Ordinary Slack text stays outside the inbox. A reply never approves actions.
+
+`reply_to_local` exposes only the verified original note and its local metadata. Clients can use that metadata to find the originating task. Reply text cannot supply a task ID.
+
+The scan reads at most 40 tracked threads each time. A saved cursor keeps a reply from arriving twice. Missing tasks require client triage. Stopped tasks use their client's existing inbox delivery rules.
+
 
 ## Slack display
 
