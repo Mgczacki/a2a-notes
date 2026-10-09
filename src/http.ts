@@ -3,7 +3,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { InitializeRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createMcpServer, VERSION } from './mcp.ts';
 import { reviewPage } from './page.ts';
 import { ServiceError } from './store.ts';
@@ -70,7 +70,8 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
       }, ...(options.slack ? { slackSignIn: (returnTo?: string) => options.slack!.beginSignIn(returnTo) } : {}) });
       // Interactive clients need a persistent connection for the form response.
       // Existing clients retain the stateless endpoint and its JSON responses.
-      if (isInitializeRequest(body) && body.params.capabilities.elicitation?.form && (session.humanApproval || session.role === 'person')) {
+      const initialization = isInitializeRequest(body) ? InitializeRequestSchema.safeParse(body) : undefined;
+      if (initialization?.success && initialization.data.params.capabilities.elicitation?.form && (session.humanApproval || session.role === 'person')) {
         if (sessions.size >= 128) { await server.close(); return send(res, 503, { error: { code: 'too_many_sessions', reason: 'Close an unused MCP client and reconnect.' } }); }
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID,
           onsessioninitialized: id => { sessions.set(id, { transport, server, authorization: authHash(authorization), lastUsed: Date.now() }); },

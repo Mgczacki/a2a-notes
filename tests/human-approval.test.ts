@@ -25,12 +25,19 @@ async function fixture(t: TestContext) {
   const clients: Client[] = [];
   t.after(async () => { await Promise.all(clients.map(c => c.close())); await running.close(); await fake.close(); });
   const token = running.clients.add('coding-client', 'agent', { humanApproval: true });
-  const connect = async (handler?: (params: any) => Promise<any>, transport: 'http' | 'stdio' = 'http', credential = token, capable = true) => {
+  const connect = async (handler?: (params: any) => Promise<any>, transport: 'http' | 'stdio' = 'http', credential = token, capable: boolean | 'legacy' = true) => {
     const c = new Client({ name: 'fake-coding-client', version: '1' }, capable ? { capabilities: { elicitation: { form: {} } } } : {});
     if (handler) c.setRequestHandler(ElicitRequestSchema, request => handler(request.params));
     clients.push(c);
     await c.connect(transport === 'http'
-      ? new StreamableHTTPClientTransport(new URL(`${running.server.url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${credential}` } } })
+      ? new StreamableHTTPClientTransport(new URL(`${running.server.url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${credential}` } },
+        ...(capable === 'legacy' ? { fetch: (async (url, init) => {
+          if (init?.body && typeof init.body === 'string') {
+            const body = JSON.parse(init.body);
+            if (body.method === 'initialize') { body.params.capabilities.elicitation = {}; init = { ...init, body: JSON.stringify(body) }; }
+          }
+          return fetch(url, init);
+        }) as typeof fetch } : {}) })
       : new StdioClientTransport({ command: process.execPath, args: ['--import', 'tsx', 'src/cli.ts', 'bridge', '--url', `${running.server.url}/mcp`],
         env: { ...process.env, A2A_NOTES_TOKEN: credential } as Record<string, string> }));
     return c;
@@ -198,4 +205,10 @@ test('a failed human interface makes no decision', async t => {
   const c = await f.connect(async () => { throw new Error('The form could not be displayed.'); });
   assert.equal((await f.request(c, d)).error.code, 'human_confirmation_failed');
   assert.equal(f.running.service.store.note(d.id)!.approval, undefined);
+});
+
+test('a client that advertises the legacy empty elicitation capability receives a human form', async t => {
+  const f = await fixture(t), d = await f.draft(); let forms = 0;
+  const c = await f.connect(async () => { forms++; return { action: 'accept', content: { decision: 'approve' } }; }, 'http', f.token, 'legacy');
+  assert.equal((await f.request(c, d)).state, 'queued'); assert.equal(forms, 1);
 });

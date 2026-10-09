@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1
+
+- Interactive HTTP clients can advertise form support with the legacy empty elicitation capability.
+
 ## 0.6.0
 
 - `a2anotes_request_approval` asks the human to decide inside an interactive MCP client.
