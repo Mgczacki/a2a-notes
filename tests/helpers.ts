@@ -28,8 +28,8 @@ export function slackConfig(fake: FakeSlack, extra = {}) {
 // One person's service with a signed-in fake Slack member. The same dir gives the same store after a restart.
 export function personService(fake: FakeSlack, user: string, dir = mkdtempSync(join(tmpdir(), `a2an-${user}-`)), extra: Partial<ServiceOptions> = {}) {
   savePrivate(join(dir, 'slack-credentials.json'), fake.credentials(user));
-  const transport = new SlackTransport(join(dir, 'slack-credentials.json'), slackConfig(fake));
-  const service = new NotesService({ store: new Store(dir), transport, scanIntervalMs: 0, ...extra });
+  const transport = new SlackTransport(join(dir, 'slack-credentials.json'), slackConfig(fake), fetch, { now: extra.now });
+  const service = new NotesService({ store: new Store(dir), transport, scanIntervalMs: 0, retryIntervalMs: 0, ...extra });
   service.start();
   return { dir, service, transport, address: `slack:${fake.team}:${user}` };
 }

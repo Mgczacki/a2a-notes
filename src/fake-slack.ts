@@ -8,7 +8,7 @@ export interface FakeUser { id: string; name: string; real_name?: string; email?
 interface Msg { ts: string; user: string; text: string; bot_id?: string; app_id?: string; blocks?: unknown; thread_ts?: string; subtype?: string; files?: { id: string }[]; client_msg_id?: string }
 interface Channel { id: string; members: [string, string]; messages: Msg[]; replies: Msg[]; updated: number }
 interface File { id: string; user: string; name: string; size: number; bytes?: Buffer; channels: string[] }
-type Failure = { mode: 'error' | 'lost' | 'ratelimit' | 'timeout'; count: number; error?: string; retryAfter?: number };
+type Failure = { mode: 'error' | 'lost' | 'ratelimit' | 'timeout'; count: number; error?: string; retryAfter?: number; after?: number };
 
 export interface FakeSlack {
   url: string; server: Server; team: string;
@@ -16,7 +16,9 @@ export interface FakeSlack {
   tokenFor(user: string): string;
   // writes credentials in the form that src/slack.ts reads
   credentials(user: string, scopes?: string[]): { user: string; team: string; name: string; scopes: string[]; access: string };
-  inject(from: string, to: string, text: string): string;
+  inject(from: string, to: string, text: string, threadTs?: string): string;
+  calls: Map<string, number>;
+  files: Map<string, File>;
   fail(method: string, failure: Failure): void;
   close(): Promise<void>;
 }
@@ -63,6 +65,7 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
   const channels = new Map<string, Channel>();
   const files = new Map<string, File>();
   const failures = new Map<string, Failure>();
+  const calls = new Map<string, number>();
   let clock = Math.floor(Date.now() / 1000) * 1_000_000;
   const nextTs = () => { clock = Math.max(clock + 1, Date.now() * 1000); return `${Math.floor(clock / 1_000_000)}.${String(clock % 1_000_000).padStart(6, '0')}`; };
   const tokenFor = (user: string) => { const t = `xoxp-fake-${user}`; tokens.set(t, user); return t; };
@@ -103,6 +106,12 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
       const start = Number(p.cursor || 0), size = Math.min(Number(p.limit || 100), 200);
       const slice = matching.slice(start, start + size), more = start + size < matching.length;
       return { messages: slice, has_more: more, response_metadata: { next_cursor: more ? String(start + size) : '' } };
+    },
+    'conversations.replies': (p, user) => {
+      const c = channels.get(p.channel); if (!c || !c.members.includes(user!)) throw new Error('channel_not_found');
+      const matching = c.replies.filter(m => m.thread_ts === p.ts && Number(m.ts) > Number(p.oldest || 0) && Number(m.ts) <= Number(p.latest || Infinity)).sort((a, b) => Number(a.ts) - Number(b.ts));
+      const start = Number(p.cursor || 0), size = Number(p.limit || 100), more = start + size < matching.length;
+      return { messages: matching.slice(start, start + size), has_more: more, response_metadata: { next_cursor: more ? String(start + size) : '' } };
     },
     'chat.postMessage': (p, user) => {
       const c = channels.get(p.channel); if (!c || !c.members.includes(user!)) throw new Error('channel_not_found');
@@ -174,7 +183,10 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
       const { raw, params } = await body(req);
       const user = tokens.get((req.headers.authorization || '').replace(/^Bearer /, ''));
       if (!user && method !== 'oauth.v2.access') return reply(200, { ok: false, error: 'invalid_auth' });
-      const failure = failures.get(method);
+      calls.set(method, (calls.get(method) || 0) + 1);
+      const scheduled = failures.get(method);
+      const failure = scheduled?.after ? undefined : scheduled;
+      if (scheduled?.after) scheduled.after--;
       if (failure && failure.count > 0) {
         failure.count--;
         if (failure.mode === 'ratelimit') return reply(429, { ok: false, error: 'ratelimited' }, { 'retry-after': String(failure.retryAfter || 1) });
@@ -187,10 +199,11 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
     } catch (error) { return reply(200, { ok: false, error: (error as Error).message.replace(/[^a-z_]/g, '') || 'fake_error' }); }
   });
 
-  function inject(from: string, to: string, text: string) {
+  function inject(from: string, to: string, text: string, threadTs?: string) {
     const c = channelFor(from, to);
     const msg: Msg = { ts: nextTs(), user: from, text };
-    c.messages.push(msg); c.updated = Date.now();
+    if (threadTs) { msg.thread_ts = threadTs; c.replies.push(msg); } else c.messages.push(msg);
+    c.updated = Date.now();
     return msg.ts;
   }
 
@@ -199,7 +212,7 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
   const address = server.address();
   base = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : options.port}`;
   return {
-    url: base, server, team, channels, tokenFor, inject,
+    url: base, server, team, channels, files, calls, tokenFor, inject,
     credentials: (user, scopes = ALL_SCOPES) => ({ user, team, name: users.get(user)?.real_name || users.get(user)?.name || user, scopes, access: tokenFor(user) }),
     fail: (method, failure) => failures.set(method, failure),
     close: () => new Promise(resolve => { server.closeAllConnections(); server.close(() => resolve()); }),

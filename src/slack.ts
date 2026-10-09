@@ -10,7 +10,7 @@ export const REQUIRED_SCOPES = ['chat:write', 'im:write', 'im:read', 'im:history
 export const OPTIONAL_SCOPES = ['users:read.email', 'files:read', 'files:write'];
 // Slack allows about 50 conversations.history calls a minute; a scan every 60 seconds reads at most 40 conversations
 const MAX_CONVERSATIONS_PER_SCAN = 40;
-const READS = new Set(['auth.test', 'conversations.history', 'conversations.list', 'files.info', 'users.info', 'users.list', 'users.lookupByEmail']);
+const READS = new Set(['auth.test', 'conversations.history', 'conversations.replies', 'conversations.list', 'files.info', 'users.info', 'users.list', 'users.lookupByEmail']);
 
 export interface SlackConfig {
   clientId: string; teamId: string;
@@ -44,12 +44,15 @@ export class SlackTransport implements Transport {
   readonly fileField = 'Slack';
   private generation = 0;
   private refreshing?: Promise<void>;
-  private blockedUntil = 0;
+  private limits: Record<string, number>;
+  private readonly now: () => number;
   private pending?: { state: string; verifier: string; expires: number; returnTo?: string };
   private names = new Map<string, { name: string; at: number }>();
   private readonly apiBase: string;
   private readonly projectLink: string | undefined;
-  constructor(readonly file: string, readonly config: SlackConfig, private fetcher: typeof fetch = fetch) {
+  constructor(readonly file: string, readonly config: SlackConfig, private fetcher: typeof fetch = fetch, options: { now?: () => number } = {}) {
+    this.now = options.now || Date.now;
+    this.limits = existsSync(file + '.limits.json') ? JSON.parse(readFileSync(file + '.limits.json', 'utf8')) : {};
     this.apiBase = (config.apiBase || 'https://slack.com/api').replace(/\/$/, '');
     this.projectLink = checkProjectLink(config.projectLink);
   }
@@ -136,7 +139,10 @@ export class SlackTransport implements Transport {
   }
 
   private async request(method: string, params: Record<string, string>, token?: string): Promise<any> {
-    if (Date.now() < this.blockedUntil) throw new TransportError('Slack rate limit. Try again later.', true, Math.ceil((this.blockedUntil - Date.now()) / 1000), true);
+    const key = `${this.config.clientId}:${this.config.teamId}:${method}`;
+    const channelKey = `${key}:${params.channel || ''}`;
+    const until = Math.max(this.limits[key] || 0, method === 'chat.postMessage' ? this.limits[channelKey] || 0 : 0);
+    if (this.now() < until) throw new TransportError(`Slack rate limit for ${method}.`, true, Math.ceil((until - this.now()) / 1000), method, 0);
     let res: Response | undefined;
     // a read can run again after a network error; a post or upload never runs twice
     for (let attempt = 0; !res; attempt++) {
@@ -144,22 +150,30 @@ export class SlackTransport implements Transport {
         res = await this.fetcher(`${this.apiBase}/${method}`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', ...(token ? { authorization: `Bearer ${token}` } : {}) },
           body: new URLSearchParams(params), signal: AbortSignal.timeout(20_000) });
       } catch {
-        if (attempt >= 1 || !READS.has(method)) throw new TransportError(`Slack did not answer ${method}.`, false);
+        if (attempt >= 1 || !READS.has(method)) throw new TransportError(`Slack did not answer ${method}.`, false, 0, method);
       }
     }
     if (res.status === 429) {
-      const header = Number(res.headers.get('retry-after'));
-      const retry = res.headers.has('retry-after') && Number.isFinite(header) && header > 0 ? Math.ceil(header) : 0;
-      this.blockedUntil = Date.now() + (retry || 60) * 1000;
-      throw new TransportError('Slack rate limit. Try again later.', true, retry, true);
+      const seconds = Number(res.headers.get('retry-after'));
+      const retry = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : 60;
+      this.limits[key] = this.now() + retry * 1000;
+      savePrivate(this.file + '.limits.json', this.limits);
+      throw new TransportError(`Slack rate limit for ${method}.`, true, retry, method, 429, res.headers.get('x-slack-req-id') || undefined);
     }
-    if (!res.ok) throw new TransportError(`Slack returned HTTP ${res.status}.`, res.status < 500);
+    if (!res.ok) throw new TransportError(`Slack returned HTTP ${res.status} for ${method}.`, res.status < 500, 0, method, res.status);
     let data: any;
-    try { data = await res.json(); } catch { throw new TransportError(`Slack returned a reply to ${method} that is not JSON.`, false); }
-    if (!data.ok) throw new TransportError(`Slack: ${String(data.error || 'request failed').replace(/[^a-z_.]/g, '').slice(0, 80)}`, true);
+    try { data = await res.json(); } catch { throw new TransportError(`Slack returned a reply to ${method} that is not JSON.`, false, 0, method, res.status); }
+    if (!data.ok) throw new TransportError(`Slack: ${String(data.error || 'request failed').replace(/[^a-z_.]/g, '').slice(0, 80)}`, !['internal_error', 'fatal_error', 'request_timeout'].includes(data.error), 0, method, res.status);
+    if (method === 'chat.postMessage') {
+      this.limits[channelKey] = this.now() + 1000;
+      savePrivate(this.file + '.limits.json', this.limits);
+    }
     return data;
   }
-  get rateLimitedUntil() { return this.blockedUntil > Date.now() ? new Date(this.blockedUntil).toISOString() : undefined; }
+  get rateLimitedUntil() {
+    const until = Math.max(0, ...Object.values(this.limits));
+    return until > this.now() ? new Date(until).toISOString() : undefined;
+  }
 
   async call(method: string, params: Record<string, string> = {}) {
     const generation = this.generation;
@@ -242,27 +256,62 @@ export class SlackTransport implements Transport {
   async send(input: SendInput) {
     const c = this.self();
     await this.checkRecipient(input.to);
-    const channel = await this.openConversation(input.to);
+    const checkpoint = input.checkpoint || { uploads: {} };
+    const save = () => input.saveCheckpoint?.(checkpoint);
+    const channel = checkpoint.channel || await this.openConversation(input.to);
+    checkpoint.channel = channel; save();
     const files: Record<string, string> = {};
     if (input.files.length && (!c.scopes.includes('files:write'))) throw new TransportError('Sending files needs the optional Slack scope files:write.', true);
-    // check the size before any upload; a Slack file ID adds at most about 20 characters for each file
     if (slackText(input.wire({}), input.display).length + input.files.length * 60 > MAX_SLACK_TEXT) throw new TransportError('The message is too long for Slack. Move detail to the agent file.', true);
     for (const f of input.files) {
-      // upload before the message: a failed upload leaves the message unsent
-      const ticket = await this.call('files.getUploadURLExternal', { filename: f.name, length: String(f.bytes.length) });
-      const target = new URL(String(ticket.upload_url || ''));
-      if (!this.allowedHost(target)) throw new TransportError('Slack returned an upload address that is not allowed.', true);
-      let upload: Response;
-      try { upload = await this.fetcher(target, { method: 'POST', body: new Uint8Array(f.bytes), signal: AbortSignal.timeout(120_000) }); }
-      catch { throw new TransportError('Slack did not accept the file bytes.', true); }
-      if (!upload.ok) throw new TransportError('Slack did not accept the file bytes.', true);
-      await this.call('files.completeUploadExternal', { files: JSON.stringify([{ id: ticket.file_id, title: f.name }]), channel_id: channel });
-      files[f.id] = String(ticket.file_id);
+      let upload = checkpoint.uploads[f.id];
+      if (!upload) {
+        const ticket = await this.call('files.getUploadURLExternal', { filename: f.name, length: String(f.bytes.length) });
+        const target = new URL(String(ticket.upload_url || ''));
+        if (!this.allowedHost(target) || !/^F[A-Z0-9]+$/.test(String(ticket.file_id))) throw new TransportError('Slack returned an invalid upload ticket.', true);
+        upload = checkpoint.uploads[f.id] = { fileId: String(ticket.file_id), url: target.href, phase: 'allocated' }; save();
+      }
+      if (upload.phase === 'allocated') {
+        if (!this.allowedHost(new URL(upload.url))) throw new TransportError('The saved upload address is not allowed.', true);
+        let response: Response;
+        try { response = await this.fetcher(upload.url, { method: 'POST', body: new Uint8Array(f.bytes), signal: AbortSignal.timeout(120_000) }); }
+        catch { throw new TransportError('Slack did not accept the file bytes.', true, 0, 'file_upload'); }
+        if (response.status === 429) throw new TransportError('Slack rate limit for file_upload.', true, Math.max(1, Number(response.headers.get('retry-after')) || 60), 'file_upload', 429);
+        if (!response.ok) throw new TransportError('Slack did not accept the file bytes.', true, 0, 'file_upload', response.status);
+        upload.phase = 'uploaded'; save();
+      }
+      if (upload.phase === 'completing') {
+        let info;
+        try { info = await this.call('files.info', { file: upload.fileId }); }
+        catch (error) {
+          if (error instanceof TransportError && error.message === 'Slack: file_not_found')
+            throw new TransportError('Slack has not confirmed the file share. No second share was attempted.', false, 0, 'files.info');
+          throw error;
+        }
+        if (!info.file?.ims?.includes(channel) && !info.file?.shares?.im?.[channel]) throw new TransportError('Slack has not confirmed the file share. No second share was attempted.', false, 0, 'files.completeUploadExternal');
+        upload.phase = 'complete'; save();
+      }
+      if (upload.phase === 'uploaded') {
+        upload.phase = 'completing'; save();
+        try { await this.call('files.completeUploadExternal', { files: JSON.stringify([{ id: upload.fileId, title: f.name }]), channel_id: channel }); }
+        catch (error) {
+          if (error instanceof TransportError && error.definite) { upload.phase = 'uploaded'; save(); }
+          throw error;
+        }
+        upload.phase = 'complete'; save();
+      }
+      files[f.id] = upload.fileId;
     }
     // people read the blocks; `text` carries the exact A2ANotes/1 text as a JSON string (src/slack-format.ts)
-    const result = await this.call('chat.postMessage', { channel, text: slackText(input.wire(files), input.display), blocks: JSON.stringify(slackBlocks(input.display, { projectLink: this.projectLink })), mrkdwn: 'false',
+    checkpoint.postStarted = true; save();
+    let result;
+    try { result = await this.call('chat.postMessage', { channel, text: slackText(input.wire(files), input.display), blocks: JSON.stringify(slackBlocks(input.display, { projectLink: this.projectLink })), mrkdwn: 'false',
       unfurl_links: 'false', unfurl_media: 'false', parse: 'none', client_msg_id: input.messageId,
-      ...(input.threadTs ? { thread_ts: input.threadTs, reply_broadcast: 'true' } : {}) });
+      ...(input.threadTs ? { thread_ts: input.threadTs, reply_broadcast: 'true' } : {}) }); }
+    catch (error) {
+      if (error instanceof TransportError && error.definite) { checkpoint.postStarted = false; save(); }
+      throw error;
+    }
     if (!result.ts) throw new TransportError('Slack did not confirm delivery.', false);
     return { channel, ts: String(result.ts), files };
   }
@@ -271,22 +320,23 @@ export class SlackTransport implements Transport {
     const c = this.self();
     const channel = await this.openConversation(to);
     let cursor = '';
-    for (;;) {
+    for (let pages = 0; pages < 1000; pages++) {
       const oldest = since ? String(Math.max(0, Math.floor(Date.parse(since) / 1000) - 86400)) : undefined;
       const page = await this.call('conversations.history', { channel, limit: '100', ...(oldest ? { oldest } : {}), ...(cursor ? { cursor } : {}) });
       const hit = (page.messages || []).find((m: any) => {
         if (m.user !== c.user || typeof m.text !== 'string') return false;
+        if (m.client_msg_id === messageId) return true;
         const read = readSlackText(m.text);
         return 'text' in read && read.text.split('\n', 2)[1] === `ID: ${messageId}`;
       });
       if (hit) return { channel, ts: String(hit.ts) };
       cursor = page.response_metadata?.next_cursor || '';
-      if (!cursor) break;
+      if (!cursor) return null;
     }
-    return null;
+    throw new TransportError('Slack history is incomplete. Delivery remains uncertain.', false, 0, 'conversations.history');
   }
 
-  async scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void) {
+  async scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void, threads: { channel: string; ts: string }[] = []) {
     const c = this.self();
     const conversations: any[] = [];
     let listCursor = '';
@@ -295,6 +345,31 @@ export class SlackTransport implements Transport {
       conversations.push(...(list.channels || []));
       listCursor = list.response_metadata?.next_cursor || '';
     } while (listCursor);
+    const roots = [...new Map(threads.map(t => [`${t.channel}:${t.ts}`, t])).values()];
+    const threadKey = (t: { channel: string; ts: string }) => `slack:${c.team}:${t.channel}:thread:${t.ts}`;
+    roots.sort((a, b) => Number(cursors[threadKey(a)] || 0) - Number(cursors[threadKey(b)] || 0));
+    for (const root of roots.slice(0, MAX_CONVERSATIONS_PER_SCAN)) {
+      const key = threadKey(root), scanAt = (Date.now() / 1000).toFixed(6);
+      try {
+      let cursor = '';
+      do {
+        const page = await this.call('conversations.replies', { channel: root.channel, ts: root.ts, oldest: cursors[key] || root.ts, latest: scanAt, limit: '100', ...(cursor ? { cursor } : {}) });
+        for (const event of (page.messages || []).sort((a: any, b: any) => Number(a.ts) - Number(b.ts))) {
+          if (Number(event.ts) <= Number(cursors[key] || root.ts) || event.ts === root.ts || event.user === c.user || !event.user || typeof event.text !== 'string' || event.subtype && event.subtype !== 'thread_broadcast') continue;
+          const read = readSlackText(event.text);
+          await handle({ conversation: `slack:${c.team}:${root.channel}`, ref: `slack:${c.team}:${root.channel}:${event.ts}`,
+            ts: String(event.ts), channel: root.channel, sender: slackAddress(c.team, String(event.user)), automated: !!(event.app_id || event.bot_id),
+            text: 'text' in read ? read.text : event.text, ...('error' in read ? { error: read.error } : {}), threadTs: root.ts });
+          save(key, String(event.ts));
+        }
+        cursor = page.response_metadata?.next_cursor || '';
+      } while (cursor);
+      save(key, scanAt);
+      } catch (error) {
+        if (error instanceof TransportError && /^Slack: (thread_not_found|channel_not_found|not_in_channel|access_denied)$/.test(error.message)) continue;
+        throw error;
+      }
+    }
     let messages = 0, scanned = 0;
     let failure: TransportError | undefined;
     const now = Date.now() / 1000;
@@ -323,8 +398,9 @@ export class SlackTransport implements Transport {
             // a post with a user token through an app has bot_id and app_id; the member in `user` is the sender
         if (ordinary && !own && event.user && typeof event.text === 'string') {
               const read = readSlackText(event.text);
+              if ('text' in read && !read.text.startsWith('A2ANotes') && !read.text.startsWith('A2A Reply/1 ')) continue;
               await handle({ conversation: k, ref: `slack:${c.team}:${conversation.id}:${event.ts}`, ts: String(event.ts), channel: conversation.id,
-                sender: slackAddress(c.team, String(event.user)), text: 'text' in read ? read.text : event.text, ...('error' in read ? { error: read.error } : {}),
+                sender: slackAddress(c.team, String(event.user)), automated: !!(event.app_id || event.bot_id), text: 'text' in read ? read.text : event.text, ...('error' in read ? { error: read.error } : {}),
                 ...(event.thread_ts ? { threadTs: String(event.thread_ts) } : {}) });
               messages++;
               save(k, String(event.ts));

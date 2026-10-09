@@ -114,7 +114,7 @@ test('an approval ends when the draft changes or the level changes before send',
   const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Hi', body: 'Hi Alex, the notes are ready.', audience: 'person', request_id: rid() });
   mario.service.approve(reviewer, { id: d.id, expected_hash: d.hash, decision: 'approve' });
   mario.service.setPolicy(person, { outgoing: 1 });
-  await code(mario.service.send(reviewer, { id: d.id, expected_hash: d.hash, request_id: rid() }), 'approval_invalid');
+  assert.equal((await mario.service.send(reviewer, { id: d.id, expected_hash: d.hash, request_id: rid() })).state, 'permanent_failure');
   const r = await mario.service.reviseDraft(agent, { id: d.id, expected_hash: d.hash, subject: 'Hi', body: 'Hi Alex, the new notes are ready.', audience: 'person' });
   assert.equal(r.approval, null);
   assert.equal(r.state, 'draft');
@@ -168,30 +168,30 @@ test('version failures, bad counts, identity mismatches, and plain chat stay awa
   await code(() => alex.service.get(agent, v2.id), 'not_found');
 });
 
-test('a lost Slack reply queues a check that finds the posted message instead of posting twice', async () => {
-  const mario = personService(fake, MARIO), alex = personService(fake, ALEX);
+test('a lost Slack reply is checked without a second post, and definite failures stop', async () => {
+  let now = Date.now();
+  const mario = personService(fake, MARIO, undefined, { now: () => now, random: () => 0 }), alex = personService(fake, ALEX);
   const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Once', body: 'Hi Alex, this goes once.', audience: 'person', request_id: rid() });
   mario.service.approve(person, { id: d.id, expected_hash: d.hash, decision: 'approve' });
   fake.fail('chat.postMessage', { mode: 'lost', count: 1 });
-  assert.equal((await mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() })).state, 'queued');
-  mario.service.store.update(d.id, n => { n.nextRetryAt = new Date(0).toISOString(); });
-  await mario.service.processQueue();
-  const again = mario.service.get(person, d.id);
+  await code(mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() }), 'delivery_uncertain');
+  assert.equal(mario.service.get(person, d.id).state, 'delivery_uncertain');
+  now += 2000;
+  const again = await mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() });
   assert.equal(again.state, 'sent');
   const copies = [...fake.channels.values()].flatMap(c => c.messages).filter(m => m.text.includes(`ID: ${d.id}`));
   assert.equal(copies.length, 1);
 
-  // a reply that never reached Slack: the retry checks, finds nothing, and sends once
+  // A timeout does not prove that Slack rejected the post.
   const e = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Twice', body: 'Hi Alex, this also goes once.', audience: 'person', request_id: rid() });
   mario.service.approve(person, { id: e.id, expected_hash: e.hash, decision: 'approve' });
   fake.fail('chat.postMessage', { mode: 'timeout', count: 1 });
-  assert.equal((await mario.service.send(person, { id: e.id, expected_hash: e.hash, request_id: rid() })).state, 'queued');
-  mario.service.store.update(e.id, n => { n.nextRetryAt = new Date(0).toISOString(); });
-  await mario.service.processQueue();
-  assert.equal(mario.service.get(person, e.id).state, 'sent');
-  assert.equal([...fake.channels.values()].flatMap(c => c.messages).filter(m => m.text.includes(`ID: ${e.id}`)).length, 1);
+  await code(mario.service.send(person, { id: e.id, expected_hash: e.hash, request_id: rid() }), 'delivery_uncertain');
+  now += 2000;
+  await code(mario.service.send(person, { id: e.id, expected_hash: e.hash, request_id: rid() }), 'delivery_uncertain');
+  assert.equal([...fake.channels.values()].flatMap(c => c.messages).filter(m => m.text.includes(`ID: ${e.id}`)).length, 0);
 
-  // Slack refuses the post: the failure stays visible until the draft is revised
+  // Slack refuses the post. The service records a final failure.
   const f = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Refused', body: 'Hi Alex, Slack refuses this one.', audience: 'person', request_id: rid() });
   mario.service.approve(person, { id: f.id, expected_hash: f.hash, decision: 'approve' });
   fake.fail('chat.postMessage', { mode: 'error', count: 1, error: 'msg_too_long' });
@@ -200,12 +200,14 @@ test('a lost Slack reply queues a check that finds the posted message instead of
 });
 
 test('after a restart the service reads saved cursors, receives what arrived while it was stopped, and marks interrupted sends', async () => {
-  const mario = personService(fake, MARIO);
+  let now = Date.now();
+  const mario = personService(fake, MARIO, undefined, { now: () => now });
   let alex = personService(fake, ALEX);
   await alex.service.scanNow();
   const before = alex.service.list(person, { direction: 'incoming' }).messages.length;
   alex.service.stop(); // Alex's service is stopped
   for (const text of ['one', 'two']) {
+    now += 2000;
     const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: `While stopped ${text}`, body: `Hi Alex, message ${text}.`, audience: 'person', request_id: rid() });
     mario.service.approve(person, { id: d.id, expected_hash: d.hash, decision: 'approve' });
     await mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() });
@@ -213,7 +215,7 @@ test('after a restart the service reads saved cursors, receives what arrived whi
   // an interrupted send in Alex's store: the process stopped between "sending" and Slack's answer
   alex.service.store.change(data => { data.notes.push({ id: 'out-x', messageId: randomUUID(), direction: 'out', state: 'sending', from: alex.address, to: mario.address, subject: 'x', body: 'x', audience: 'person', threadId: randomUUID(), replyTo: null, fileIds: [], hash: 'h', created: new Date().toISOString(), updated: new Date().toISOString() }); });
   alex = personService(fake, ALEX, alex.dir); // restart with the same data folder
-  assert.equal(alex.service.store.note('out-x')?.state, 'queued');
+  assert.equal(alex.service.store.note('out-x')?.state, 'delivery_uncertain');
   await alex.service.scanNow();
   assert.equal(alex.service.list(person, { direction: 'incoming' }).messages.length, before + 2);
   await alex.service.scanNow();
@@ -235,7 +237,8 @@ test('a rate limit delays the next scan and shows in the status', async () => {
 });
 
 test('a Slack rate limit queues the approved message, honors Retry-After, and sends once after restart', async () => {
-  let mario = personService(fake, MARIO);
+  let now = Date.now();
+  let mario = personService(fake, MARIO, undefined, { now: () => now });
   const alex = personService(fake, ALEX);
   const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Rate limit', body: 'Hi Alex, this is the approved text.', audience: 'person', request_id: rid() });
   await code(mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() }), 'not_approved');
@@ -248,10 +251,9 @@ test('a Slack rate limit queues the approved message, honors Retry-After, and se
   assert.equal(queued.to, alex.address);
   assert.equal((await mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() })).state, 'queued');
   mario.service.stop();
-  mario = personService(fake, MARIO, mario.dir);
+  mario = personService(fake, MARIO, mario.dir, { now: () => now });
   assert.equal(mario.service.get(person, d.id).state, 'queued');
-  (mario.transport as any).blockedUntil = 0;
-  mario.service.store.update(d.id, n => { n.nextRetryAt = new Date(0).toISOString(); });
+  now += 8000;
   await mario.service.processQueue();
   assert.equal(mario.service.get(person, d.id).state, 'sent');
   await mario.service.processQueue();
@@ -273,18 +275,19 @@ test('a permanent Slack error stops retries and leaves the draft available to re
 });
 
 test('a rate limit without Retry-After uses bounded backoff', async () => {
-  const mario = personService(fake, MARIO), alex = personService(fake, ALEX);
+  let now = Date.now();
+  const mario = personService(fake, MARIO, undefined, { now: () => now, random: () => 0.5 }), alex = personService(fake, ALEX);
   const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Backoff', body: 'Hi Alex, please read this.', audience: 'person', request_id: rid() });
   mario.service.approve(person, { id: d.id, expected_hash: d.hash, decision: 'approve' });
   (mario.transport as any).send = async () => { throw new TransportError('Slack rate limit.', true, 0, true); };
   const first = await mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() });
-  assert.ok(Date.parse(first.next_retry_at!) - Date.now() >= 59_000);
-  mario.service.store.update(d.id, n => { n.nextRetryAt = new Date(0).toISOString(); });
+  assert.equal(Date.parse(first.next_retry_at!) - now, 45_000);
+  now = Date.parse(first.next_retry_at!);
   await mario.service.processQueue();
   const second = mario.service.get(person, d.id);
   assert.equal(second.state, 'queued');
-  assert.ok(Date.parse(second.next_retry_at!) - Date.now() >= 119_000);
-  assert.ok((mario.service as any).retryDelay(new TransportError('rate limit', true, 0, true), 30) <= 60 * 60_000);
+  assert.equal(Date.parse(second.next_retry_at!) - now, 90_000);
+  assert.ok(Date.parse(second.next_retry_at!) - now <= 300_000);
 });
 
 test('a queued message with an invalid approval never posts', async () => {
@@ -298,15 +301,16 @@ test('a queued message with an invalid approval never posts', async () => {
 });
 
 test('a lost Slack reply is found after restart without a second post', async () => {
-  let mario = personService(fake, MARIO);
+  let now = Date.now();
+  let mario = personService(fake, MARIO, undefined, { now: () => now });
   const alex = personService(fake, ALEX);
   const d = await mario.service.createDraft(agent, { to_address: alex.address, subject: 'Restart duplicate', body: 'Hi Alex, please read this.', audience: 'person', request_id: rid() });
   mario.service.approve(person, { id: d.id, expected_hash: d.hash, decision: 'approve' });
   fake.fail('chat.postMessage', { mode: 'lost', count: 1 });
-  assert.equal((await mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() })).state, 'queued');
+  await code(mario.service.send(person, { id: d.id, expected_hash: d.hash, request_id: rid() }), 'delivery_uncertain');
   mario.service.stop();
-  mario = personService(fake, MARIO, mario.dir);
-  mario.service.store.update(d.id, n => { n.nextRetryAt = new Date(0).toISOString(); });
+  mario = personService(fake, MARIO, mario.dir, { now: () => now });
+  now += 2000;
   await mario.service.processQueue();
   assert.equal(mario.service.get(person, d.id).state, 'sent');
   assert.equal([...fake.channels.values()].flatMap(c => c.messages).filter(m => m.text.includes(`ID: ${d.id}`)).length, 1);

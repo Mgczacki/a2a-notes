@@ -1,3 +1,4 @@
+import type { SendCheckpoint } from './store.ts';
 // The contract between the protocol core (src/service.ts) and a delivery service. The core stores stable message
 // and attachment IDs. An adapter maps them to its own IDs, checks identities, and moves text and file bytes.
 export interface Person { address: string; name: string; realName: string; title: string; active: boolean; email?: string; image?: string }
@@ -7,11 +8,12 @@ export interface Identity { transport: string; address: string; name: string; sc
 export interface Received {
   conversation: string; ref: string; ts: string; channel: string; sender: string; text: string; threadTs?: string;
   // the adapter found A2A Notes data that it could not read; the core keeps the message for the person with this reason
+  automated?: boolean;
   error?: string;
 }
 // What a person reads. Each adapter formats it for its own service (src/slack-format.ts for Slack).
 export interface Display {
-  subject: string; body: string; audience: 'person' | 'agent' | 'both'; senderName: string;
+  messageId?: string; subject: string; body: string; audience: 'person' | 'agent' | 'both'; senderName: string;
   agentFile?: { name: string; size: number }; files: { name: string; size: number }[];
 }
 export interface SendInput {
@@ -22,12 +24,20 @@ export interface SendInput {
   display: Display;
   files: { id: string; name: string; bytes: Buffer }[];
   threadTs?: string;
+  checkpoint?: SendCheckpoint;
+  saveCheckpoint?: (checkpoint: SendCheckpoint) => void;
 }
 export interface SendResult { channel: string; ts: string; files: Record<string, string> }
 
 export class TransportError extends Error {
   // definite: the service answered and did not post the message. A timeout or lost reply is not definite.
-  constructor(message: string, readonly definite: boolean, readonly retryAfter = 0, readonly rateLimited = false) { super(message); }
+  readonly method?: string;
+  readonly rateLimited: boolean;
+  constructor(message: string, readonly definite: boolean, readonly retryAfter = 0, methodOrRateLimited?: string | boolean, readonly status?: number, readonly requestId?: string) {
+    super(message);
+    this.method = typeof methodOrRateLimited === 'string' ? methodOrRateLimited : undefined;
+    this.rateLimited = methodOrRateLimited === true || status === 429 || retryAfter > 0;
+  }
 }
 
 export interface Transport {
@@ -42,7 +52,7 @@ export interface Transport {
   findSent(to: string, messageId: string, since?: string): Promise<{ channel: string; ts: string } | null>;
   // reads messages newer than each saved cursor, oldest first. handle stores and checks one message; the adapter
   // calls save after handle returns, so a failed message is read again at the next scan.
-  scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void): Promise<{ conversations: number; messages: number }>;
+  scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void, threads?: { channel: string; ts: string }[]): Promise<{ conversations: number; messages: number }>;
   download(fileRef: string, received: Received, maxBytes: number): Promise<Buffer>;
   // the display name of a member address, for the person reading the inbox (optional)
   nameOf?(address: string): Promise<string | undefined>;

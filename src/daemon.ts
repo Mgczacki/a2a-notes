@@ -1,7 +1,7 @@
 // Starts one A2A Notes service for one person: the store, the Slack adapter, the scan timer, and the HTTP server.
 // The data folder holds config.json, store.json, clients.json, slack-credentials.json, files/, and local-secret.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -37,27 +37,46 @@ export interface Running { service: NotesService; server: Server & { url: string
 export async function startService(dir: string, overrides: Partial<Config> = {}, fetcher?: typeof fetch, onStop?: () => void): Promise<Running> {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const config = { ...readConfig(dir), ...overrides };
-  const store = new Store(dir);
-  const slack = new SlackTransport(join(dir, 'slack-credentials.json'), config.slack, fetcher);
-  const service = new NotesService({ store, transport: slack, reviewer: config.reviewCommand?.length ? commandReviewer(config.reviewCommand) : undefined,
-    bodyChecker: config.bodyCheckCommand?.length ? commandBodyChecker(config.bodyCheckCommand) : undefined,
-    stagingDir: config.stagingDir, scanIntervalMs: (config.scanIntervalSeconds ?? 60) * 1000 });
-  const clients = new Clients(dir);
-  // the local secret lets the command-line tool on this account ask the running service for a page sign-in code
-  const secretFile = join(dir, 'local-secret');
-  const secret = randomBytes(32).toString('base64url');
-  savePrivate(secretFile, secret);
-  const server = await startHttp({ service, clients, port: config.port, host: config.host, slack, onStop,
-    local: given => { const a = Buffer.from(given), b = Buffer.from(secret); return a.length === b.length && timingSafeEqual(a, b); } });
-  service.start();
-  savePrivate(join(dir, 'service.json'), { url: server.url, pid: process.pid, started: new Date().toISOString() });
-  return {
-    service, server, clients, slack,
-    close: () => new Promise(resolve => {
-      service.stop();
-      try { unlinkSync(join(dir, 'service.json')); } catch { /* already removed */ }
-      server.closeAllConnections();
-      server.close(() => resolve());
-    }),
-  };
+  const lockFile = join(dir, 'service.lock');
+  if (existsSync(lockFile)) {
+    const pid = Number(readFileSync(lockFile, 'utf8'));
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error('The service lock has no valid owner. Check the data folder.');
+    try { process.kill(pid, 0); throw new Error('An A2A Notes service already owns this data folder.'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+    unlinkSync(lockFile);
+  }
+  const fd = openSync(lockFile, 'wx', 0o600);
+  try { writeFileSync(fd, String(process.pid)); fsyncSync(fd); } finally { closeSync(fd); }
+  let service: NotesService | undefined;
+  try {
+    const store = new Store(dir);
+    const slack = new SlackTransport(join(dir, 'slack-credentials.json'), config.slack, fetcher);
+    service = new NotesService({ store, transport: slack, reviewer: config.reviewCommand?.length ? commandReviewer(config.reviewCommand) : undefined,
+      bodyChecker: config.bodyCheckCommand?.length ? commandBodyChecker(config.bodyCheckCommand) : undefined,
+      stagingDir: config.stagingDir, scanIntervalMs: (config.scanIntervalSeconds ?? 60) * 1000 });
+    const clients = new Clients(dir);
+    // the local secret lets the command-line tool on this account ask the running service for a page sign-in code
+    const secretFile = join(dir, 'local-secret');
+    const secret = randomBytes(32).toString('base64url');
+    savePrivate(secretFile, secret);
+    const server = await startHttp({ service, clients, port: config.port, host: config.host, slack, onStop,
+      local: given => { const a = Buffer.from(given), b = Buffer.from(secret); return a.length === b.length && timingSafeEqual(a, b); } });
+    service.start();
+    savePrivate(join(dir, 'service.json'), { url: server.url, pid: process.pid, started: new Date().toISOString() });
+    return {
+      service, server, clients, slack,
+      close: async () => {
+        await service!.stop();
+        return new Promise(resolve => {
+        try { unlinkSync(join(dir, 'service.json')); } catch { /* already removed */ }
+        server.closeAllConnections();
+        server.close(() => { try { unlinkSync(lockFile); } catch { /* already removed */ } resolve(); });
+        });
+      },
+    };
+  } catch (error) {
+    await service?.stop();
+    try { unlinkSync(lockFile); } catch { /* already removed */ }
+    throw error;
+  }
 }

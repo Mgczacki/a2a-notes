@@ -9,7 +9,7 @@ import { DEFAULT_POLICY, type Policy } from './policy.ts';
 import type { BodyCheck, ReviewResult } from './checks.ts';
 
 export type Role = 'person' | 'reviewer' | 'agent';
-export type OutState = 'draft' | 'approved' | 'queued' | 'sending' | 'sent' | 'delivery_uncertain' | 'permanent_failure' | 'rejected';
+export type OutState = 'draft' | 'approved' | 'sending' | 'sent' | 'delivery_uncertain' | 'queued' | 'permanent_failure' | 'rejected';
 export type InState = 'held' | 'approved' | 'rejected' | 'failed' | 'quarantined';
 
 export interface StoredFile {
@@ -17,6 +17,15 @@ export interface StoredFile {
   created: string; stagedBy?: string; agentRequest?: AgentRequest;
 }
 export interface Approval { by: 'person' | 'reviewer'; actor: string; at: string; hash: string; policyVersion: number }
+export interface Delivery {
+  hash: string; actor: string; attempts: number; rateLimits: number; nextAttemptAt?: string;
+  lastMethod?: string; lastStatus?: number; lastRequestId?: string; lastRetryAfter?: number;
+  stoppedAt?: string; failureCode?: string; uncertain?: boolean;
+}
+export interface SendCheckpoint {
+  channel?: string; postStarted?: boolean;
+  uploads: Record<string, { fileId: string; url: string; phase: 'allocated' | 'uploaded' | 'completing' | 'complete' }>;
+}
 export interface Note {
   id: string; messageId: string; direction: 'in' | 'out'; state: OutState | InState;
   from: string; to: string; peerName?: string; subject: string; body: string; audience: Audience;
@@ -28,6 +37,9 @@ export interface Note {
   // hash and never goes over the transport (src/service.ts checkMetadata)
   metadata?: Metadata;
   createdBy?: { session: string; role: Role };
+  source?: 'human_reply';
+  delivery?: Delivery;
+  checkpoint?: SendCheckpoint;
   transport?: { name: string; channel?: string; ts?: string; threadTs?: string; files?: Record<string, string> };
   failure?: { code: string; reason: string; raw?: string };
   error?: string; seen?: string; created: string; updated: string; sendStartedAt?: string; sentAt?: string;
@@ -52,6 +64,8 @@ export function savePrivate(path: string, data: unknown) {
   const fd = openSync(temp, 'wx', 0o600);
   try { writeFileSync(fd, typeof data === 'string' ? data : JSON.stringify(data, null, 2)); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temp, path);
+  const dirFd = openSync(dirname(path), 'r');
+  try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
 }
 
 export function noteHash(n: Pick<Note, 'messageId' | 'to' | 'subject' | 'body' | 'audience' | 'threadId' | 'replyTo'>, files: Pick<StoredFile, 'id' | 'name' | 'size' | 'sha256' | 'kind'>[]) {

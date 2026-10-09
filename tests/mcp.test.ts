@@ -81,7 +81,7 @@ test('tools and resources follow the session role, and two clients share one sto
   assert.equal((await call(human, 'a2anotes_set_trusted_sender', { address: alex.address, name: 'Alex', trusted: true })).trusted, true);
   const review = await call(controller, 'a2anotes_review_message', { id });
   assert.equal(review.approver, 'reviewer');
-  assert.equal((await call(controller, 'a2anotes_approve', { id, expected_hash: draft.hash, decision: 'approve' })).state, 'approved');
+  assert.equal((await call(controller, 'a2anotes_approve', { id, expected_hash: draft.hash, decision: 'approve' })).state, 'queued');
   assert.equal((await call(agentA, 'a2anotes_send', { id, expected_hash: draft.hash, request_id: `r-${randomUUID()}` })).error.code, 'forbidden');
   assert.equal((await call(controller, 'a2anotes_send', { id, expected_hash: draft.hash, request_id: `r-${randomUUID()}` })).state, 'sent');
 
@@ -166,6 +166,7 @@ test('a received message shows the sender name from Slack', async () => {
   const d = await call(mario2, 'a2anotes_create_draft', { to_address: alex.address, subject: 'Name check', body: 'Hi Alex, this checks the sender name.', audience: 'person', request_id: `r-${randomUUID()}` });
   await call(controller2, 'a2anotes_approve', { id: d.id, expected_hash: d.hash, decision: 'approve' });
   await call(controller2, 'a2anotes_send', { id: d.id, expected_hash: d.hash, request_id: `r-${randomUUID()}` });
+  await new Promise(r => setTimeout(r, 2200));
   await call(alexPerson, 'a2anotes_sync');
   const got = (await call(alexPerson, 'a2anotes_list_messages', { direction: 'incoming' })).messages.find((m: any) => m.message_id === d.id);
   assert.equal(got.peer_name, 'Mario G');
