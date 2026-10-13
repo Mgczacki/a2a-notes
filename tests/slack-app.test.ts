@@ -83,6 +83,15 @@ test('only known native unavailability permits app composer fallback', async () 
   await f.transport.send(input);assert.equal(f.calls.filter(c=>c==='submit').length,1);
 });
 
+test('API upload progress cannot become a second attachment through the app adapter', async () => {
+  const f=fixture();await f.transport.connect();let native=0;
+  f.transport.desktopSender={canSend:()=>true,post:async()=>{native++;throw new Error('No native call is permitted');}};
+  await assert.rejects(f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:randomUUID(),
+    display:{subject:'Plan',body:'Please read.',audience:'person',senderName:'Mario',files:[]},files:[],wire:()=>'',
+    checkpoint:{channel:'DOTHER01',uploads:{file:{fileId:'FOLD01',url:'https://files.slack.com/old',phase:'complete'}}}}),/earlier Slack adapter/);
+  assert.equal(native,0);assert.deepEqual(f.calls,[]);
+});
+
 test('app connection binds account IDs without reading an OAuth credential file', async () => {
   const f=fixture(); assert.equal(f.transport.identity(),null);
   writeFileSync(join(f.file,'..','slack-credentials.json'), 'not JSON and never read');

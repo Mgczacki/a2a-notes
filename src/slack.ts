@@ -121,6 +121,8 @@ export class SlackTransport implements Transport {
     return this.run(async (app, s) => {const view = await this.view(app, channel); return view.peers.some(p => p.id === channel && p.user === s.user);});
   }
   async send(input: SendInput) {
+    if (Object.values(input.checkpoint?.uploads || {}).some(upload => !/^APP[a-f0-9]{64}$/.test(upload.fileId)))
+      throw new TransportError('Saved file progress requires the earlier Slack adapter. No new message was posted.', true);
     if (input.files.reduce((size, f) => size + f.bytes.length, 0) > 26_000) throw new TransportError('The encoded attachments exceed the app text limit. No message was posted.', true);
     const files = Object.fromEntries(input.files.map(f => [f.id, 'APP' + createHash('sha256').update(f.bytes).digest('hex')]));
     const attachments = input.files.map(f => ({ref:files[f.id], name:f.name, base64:f.bytes.toString('base64')}));

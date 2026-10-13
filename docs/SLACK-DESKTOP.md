@@ -77,3 +77,7 @@ This preference makes no direct Slack HTTP call from A2A Notes.
 Use `desktop enable` without `--send` and restart A2A Notes to restore app composer posting.
 The service still reads saved native receipts when it recovers an uncertain operation.
 Closing the debugger connection does not permit another post for an uncertain note.
+
+An outgoing note with saved Web API upload progress stops before the app adapter posts.
+Recover that unfinished operation with the earlier adapter before migrating it.
+The app adapter cannot replace an earlier shared file with an inline attachment.
