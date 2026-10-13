@@ -98,6 +98,11 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
     },
     'users.lookupByEmail': p => { const u = [...users.values()].find(x => x.email?.toLowerCase() === String(p.email).toLowerCase()); if (!u) throw new Error('users_not_found'); return { user: member(u) }; },
     'conversations.open': (p, user) => { const other = String(p.users); if (!users.has(other)) throw new Error('user_not_found'); return { channel: { id: channelFor(user!, other).id } }; },
+    'conversations.info': (p, user) => {
+      const channel = channels.get(p.channel);
+      if (!channel || !user || !channel.members.includes(user)) throw new Error('channel_not_found');
+      return { channel: { id: channel.id, is_im: true, user: channel.members.find(x => x !== user) || user } };
+    },
     'conversations.list': (_p, user) => ({ channels: [...channels.values()].filter(c => c.members.includes(user!)).map(c => ({ id: c.id, is_im: true, user: c.members[0] === user ? c.members[1] : c.members[0], updated: c.updated })), response_metadata: { next_cursor: '' } }),
     'conversations.history': (p, user) => {
       const c = channels.get(p.channel); if (!c || !c.members.includes(user!)) throw new Error('channel_not_found');

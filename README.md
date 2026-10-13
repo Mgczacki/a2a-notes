@@ -16,6 +16,10 @@ The wire format is `A2ANotes/1`. The agent file format is `a2anotes.request/1`. 
 - `src/mcp.ts` and `src/http.ts`: the MCP server on loopback Streamable HTTP, the review page, and the page API.
 - `src/bridge.ts`: a stdio bridge for command-line agents.
 - `src/fake-slack.ts`: a fake Slack Web API for tests and sandboxes.
+- `src/slack-desktop.ts`: an optional connector for native Slack Desktop events on macOS.
+
+See [Slack Desktop setup](docs/SLACK-DESKTOP.md) to receive live events without desktop clicks or screenshots.
+The connector keeps the existing sender checks and action approval rules.
 
 ## Install and start
 

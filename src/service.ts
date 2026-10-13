@@ -97,7 +97,11 @@ export class NotesService {
     }
     const every = this.options.scanIntervalMs ?? 60_000;
     if (every > 0) {
-      this.timer = setInterval(() => { void this.scanNow().catch(() => {}); }, every);
+      this.timer = setInterval(() => {
+        const at = this.store.read().health.lastScanAt;
+        if (this.desktopListening && at && Date.now() - Date.parse(at) < 300_000) return;
+        void this.scanNow().catch(() => {});
+      }, every);
       this.timer.unref();
       void this.scanNow().catch(() => {});
     }
@@ -110,6 +114,10 @@ export class NotesService {
     await Promise.allSettled([...this.active]);
     await this.scanning?.catch(() => {});
   }
+
+  private desktopListening = false;
+  desktopStatus?: () => import('./slack-desktop.ts').DesktopStatus;
+  setDesktopListening(connected: boolean) { this.desktopListening = connected; }
 
   // ---- policy ----
 
@@ -223,7 +231,7 @@ export class NotesService {
     const stale = !health.lastSuccessAt || Date.now() - Date.parse(health.lastSuccessAt) > 5 * 60_000;
     return { transport: this.transport.name, signed_in: !!id, address: id?.address ?? null, missing_scopes: id?.missingScopes ?? [], optional_missing: id?.optionalMissing ?? [],
       last_scan_at: health.lastScanAt ?? null, last_success_at: health.lastSuccessAt ?? null, last_error: health.lastError ?? null,
-      rate_limited_until: health.rateLimitedUntil && Date.parse(health.rateLimitedUntil) > Date.now() ? health.rateLimitedUntil : null, stale };
+      rate_limited_until: health.rateLimitedUntil && Date.parse(health.rateLimitedUntil) > Date.now() ? health.rateLimitedUntil : null, stale, ...(this.desktopStatus ? { desktop: this.desktopStatus() } : {}) };
   }
   async findPeople(query: unknown, limit: unknown, cursor: unknown) {
     if (typeof query !== 'string' || query.trim().length < 2 || query.length > 200) throw new ServiceError('invalid_input', 'The search text must have 2 to 200 characters.', 'Search with a longer name or an email address.');

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0
+
+- Connect to the installed macOS Slack app through an optional loopback debugging port.
+- Verify the port owner and the current account before reading native WebSocket events.
+- Save explicit DM events before the existing service checks and reads them.
+- Prevent duplicate notes across desktop events, history polling, and restarts.
+- Reduce history polling to five-minute recovery scans while the verified native connection remains open.
+- Show desktop connection status through the current status command and MCP tool.
+- Add desktop setup and probe commands. The probe delivers no notes.
+- Keep current content checks and action approval rules. Outgoing sends retain Web API limits and the durable queue.
+
 ## 0.7.0
 
 - Read explicit direct human messages with `A2A #task` or `A2A @alias` on the first line.

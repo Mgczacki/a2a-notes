@@ -10,6 +10,7 @@ import { commandBodyChecker, commandReviewer } from './checks.ts';
 import { startHttp } from './http.ts';
 import { NotesService } from './service.ts';
 import { SlackTransport, type SlackConfig } from './slack.ts';
+import { SlackDesktopHook, desktopURL, type DesktopConfig } from './slack-desktop.ts';
 import { savePrivate, Store } from './store.ts';
 
 export interface Config {
@@ -20,6 +21,7 @@ export interface Config {
   bodyCheckCommand?: string[];
   stagingDir?: string;
   scanIntervalSeconds?: number;
+  desktop?: DesktopConfig;
 }
 export const defaultDir = () => process.env.A2A_NOTES_DIR || join(homedir(), '.a2a-notes');
 
@@ -29,6 +31,7 @@ export function readConfig(dir: string): Config {
   const config = JSON.parse(readFileSync(file, 'utf8')) as Config;
   if (!Number.isInteger(config.port) || config.port < 0 || config.port > 65535) throw new Error('config.json needs a port.');
   if (!config.slack?.clientId || !config.slack.teamId || !config.slack.redirectUri) throw new Error('config.json needs slack.clientId, slack.teamId, and slack.redirectUri.');
+  if (config.desktop) desktopURL(config.desktop.url);
   return config;
 }
 
@@ -62,12 +65,20 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
   const fd = openSync(lockFile, 'wx', 0o600);
   try { writeFileSync(fd, String(process.pid)); fsyncSync(fd); } finally { closeSync(fd); }
   let service: NotesService | undefined;
+  let desktop: SlackDesktopHook | undefined;
   try {
     const store = new Store(dir);
     const slack = new SlackTransport(join(dir, 'slack-credentials.json'), config.slack, fetcher);
     service = new NotesService({ store, transport: slack, reviewer: config.reviewCommand?.length ? commandReviewer(config.reviewCommand) : undefined,
       bodyChecker: config.bodyCheckCommand?.length ? commandBodyChecker(config.bodyCheckCommand) : undefined,
       stagingDir: config.stagingDir, scanIntervalMs: (config.scanIntervalSeconds ?? 60) * 1000 });
+    if (config.desktop) {
+      const owner = service;
+      desktop = new SlackDesktopHook({ config: config.desktop, dir,
+        identity: () => slack.identity(), verifyChannel: channel => slack.verifyDesktopChannel(channel),
+        receive: event => owner.receive(event), connection: active => owner.setDesktopListening(active) });
+      service.desktopStatus = () => desktop!.status();
+    }
     const clients = new Clients(dir);
     // the local secret lets the command-line tool on this account ask the running service for a page sign-in code
     const secretFile = join(dir, 'local-secret');
@@ -75,11 +86,12 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
     savePrivate(secretFile, secret);
     const server = await startHttp({ service, clients, port: config.port, host: config.host, slack, onStop,
       local: given => { const a = Buffer.from(given), b = Buffer.from(secret); return a.length === b.length && timingSafeEqual(a, b); } });
-    service.start();
+    service.start(); desktop?.start();
     savePrivate(join(dir, 'service.json'), { url: server.url, pid: process.pid, started: new Date().toISOString() });
     return {
       service, server, clients, slack,
       close: async () => {
+        await desktop?.close();
         await service!.stop();
         return new Promise(resolve => {
           try { unlinkSync(join(dir, 'service.json')); } catch { /* already removed */ }
@@ -89,6 +101,7 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
       },
     };
   } catch (error) {
+    await desktop?.close();
     await service?.stop();
     try { unlinkSync(lockFile); } catch { /* already removed */ }
     throw error;

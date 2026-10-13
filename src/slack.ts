@@ -337,6 +337,15 @@ export class SlackTransport implements Transport {
     throw new TransportError('Slack history is incomplete. Delivery remains uncertain.', false, 0, 'conversations.history');
   }
 
+  async verifyDesktopChannel(channel: string): Promise<boolean> {
+    if (!/^D[A-Z0-9]{2,20}$/.test(channel)) throw new TransportError('The desktop message is not in a Slack DM.', true);
+    const c = this.self();
+    const result = await this.call('conversations.info', { channel });
+    if (!result.channel?.is_im || result.channel.id !== channel || typeof result.channel.user !== 'string')
+      throw new TransportError('Slack did not verify the desktop DM channel.', true);
+    return result.channel.user === c.user;
+  }
+
   async scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void, threads: { channel: string; ts: string }[] = []) {
     const c = this.self();
     const conversations: any[] = [];

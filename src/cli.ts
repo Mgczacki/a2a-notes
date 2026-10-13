@@ -1,12 +1,14 @@
 // a2a-notes: the command-line tool. See README.md for each command.
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { defaultDir, readConfig, startService } from './daemon.ts';
 import { Clients, ROLES } from './clients.ts';
 import { runBridge } from './bridge.ts';
 import { startFakeSlack } from './fake-slack.ts';
 import { savePrivate, type Role } from './store.ts';
+import { SlackDesktopHook, desktopURL } from './slack-desktop.ts';
+import { SlackTransport } from './slack.ts';
 
 const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -19,6 +21,9 @@ const usage = `a2a-notes <command>
   token list | token remove <name>
   open                                    print a one-time link to the review page
   status                                  print the connection and scan status
+  desktop enable --url http://127.0.0.1:P  save the optional Slack Desktop endpoint
+  desktop disable                         remove the endpoint from config
+  desktop probe --url URL [--seconds 30]   check the installed app without delivering notes
   stop                                    stop the running service
   bridge [--url URL]                      stdio MCP bridge; reads the token from A2A_NOTES_TOKEN
   import-slack <credentials.json> [--no-refresh]   use existing Slack user credentials
@@ -68,6 +73,32 @@ switch (cmd) {
   case 'open': console.log((await local('/local/login-code')).url); break;
   case 'status': console.log(JSON.stringify((await local('/local/login-code')).status, null, 2)); break;
   case 'stop': await local('/local/stop'); console.log('The service is stopping.'); break;
+  case 'desktop': {
+    const config = readConfig(dir);
+    if (sub === 'enable') {
+      const url = desktopURL(flag('--url') || '').origin;
+      config.desktop = { url }; savePrivate(join(dir, 'config.json'), config);
+      console.log('Saved the Slack Desktop endpoint. Restart A2A Notes to connect.');
+    } else if (sub === 'disable') {
+      delete config.desktop; savePrivate(join(dir, 'config.json'), config);
+      console.log('Removed the Slack Desktop endpoint. Restart A2A Notes to use history polling.');
+    } else if (sub === 'probe') {
+      const url = desktopURL(flag('--url') || config.desktop?.url || '').origin;
+      const seconds = Number(flag('--seconds') || 30);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300) throw new Error('Use a probe time from 1 to 300 seconds.');
+      const slack = new SlackTransport(join(dir, 'slack-credentials.json'), config.slack);
+      const temporary = mkdtempSync(join(tmpdir(), 'a2a-desktop-probe-'));
+      let events = 0;
+      const hook = new SlackDesktopHook({ config: { url }, dir: temporary, identity: () => slack.identity(),
+        verifyChannel: channel => slack.verifyDesktopChannel(channel), receive: async () => { events++; } });
+      try {
+        hook.start();
+        await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+        console.log(JSON.stringify({ ...hook.status(), events, delivered: false }, null, 2));
+      } finally { await hook.close(); rmSync(temporary, { recursive: true, force: true }); }
+    } else throw new Error('Use desktop enable, disable, or probe.');
+    break;
+  }
   case 'bridge': {
     const token = process.env.A2A_NOTES_TOKEN;
     if (!token) { console.error('Set A2A_NOTES_TOKEN to a client token from a2a-notes token add.'); process.exit(1); }
