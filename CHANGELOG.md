@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0
+
+- Read explicit direct human messages with `A2A #task` or `A2A @alias` on the first line.
+- Accept native owner messages in the verified Slack self-conversation for the current content hash and policy.
+- Keep checks and approval requirements for other senders.
+- Read owner replies that earlier versions skipped. Keep the original audience and note link.
+- Ignore ordinary Slack text and app posts in this flow. Keep action approval separate.
+- Use separate owner cursors to recover skipped replies without duplicating notes after a restart.
+
 ## 0.6.1
 
 - Interactive HTTP clients can advertise form support with the legacy empty elicitation capability.

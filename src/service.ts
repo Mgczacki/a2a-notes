@@ -123,6 +123,7 @@ export class NotesService {
   }
   // An approval counts when it matches the current hash and the current levels still permit the one who gave it.
   approvalValid(n: Note, data: Pick<Data, 'trusted' | 'policy'>) {
+    if (n.ownerMessage && noteHash(n, this.files(this.store.read(), n)) !== n.hash) return false;
     if (!n.approval || n.approval.hash !== n.hash || n.approval.policyVersion !== data.policy.version || n.state === 'rejected') return false;
     const approver = this.approverFor(n, data);
     return n.approval.by === 'person' ? approver !== 'nobody' : approver === 'reviewer';
@@ -178,7 +179,7 @@ export class NotesService {
       approver: this.approverFor(n, data), approved_by: n.approval && n.approval.hash === n.hash ? n.approval.by : null,
       thread_id: n.threadId, created: n.created, updated: n.updated, seen: !!n.seen, ...(n.failure ? { failure_code: n.failure.code } : {}),
       next_retry_at: n.delivery?.nextAttemptAt ?? n.nextRetryAt ?? null, sent_at: n.sentAt ?? null,
-      source: n.source ?? 'a2anotes', delivery: n.delivery ?? null, error: n.error ?? null,
+      source: n.source ?? 'a2anotes', direct_target: n.directTarget ?? null, owner_message: this.isOwnerMessage(n, data), delivery: n.delivery ?? null, error: n.error ?? null,
       metadata: n.metadata ?? null, reply_to_local: this.replyLink(n, data),
       hash: n.hash, allowed_actions: this.allowed(n, data, session),
     };
@@ -738,7 +739,10 @@ export class NotesService {
     if (m.error) return fail('malformed', m.error);
     const decoded = decode(m.text);
     if (!decoded.ok) {
-      if (decoded.code === 'not_a2anotes') return this.receiveHumanReply(m, id, base);
+      if (decoded.code === 'not_a2anotes') {
+        if (/^A2A [#@]/.test(m.text)) return this.receiveHumanMessage(m, base);
+        return this.receiveHumanReply(m, id, base);
+      }
       return fail(decoded.code, decoded.reason);
     }
     const w = decoded.message;
@@ -806,9 +810,50 @@ export class NotesService {
     note.hash = noteHash(note, []);
     note.review = await review({ direction: 'incoming', subject: note.subject, body, files: [] }, this.reviewer);
     if (note.review.verdict === 'quarantine') note.state = 'quarantined';
+    this.acceptOwnerMessage(m, note);
     this.store.change(d => {
       if (d.notes.some(n => n.id === id)) return;
       d.notes.push(note); this.store.audit(d, 'service', 'human_reply_received', id, original.id);
+    });
+  }
+
+  private isOwnerMessage(n: Note, data: Data): boolean {
+    return !!n.ownerMessage && n.direction === 'in' && ['human_reply', 'human_message'].includes(n.source || '') &&
+      n.ownerMessage.address === this.transport.identity()?.address && n.from === n.to && n.from === n.ownerMessage.address &&
+      n.approval?.by === 'person' && n.approval.actor === n.from && n.ownerMessage.hash === n.hash && noteHash(n, this.files(data, n)) === n.hash && n.state === 'approved' && this.approvalValid(n, data);
+  }
+
+  private acceptOwnerMessage(m: Received, note: Note) {
+    const data = this.store.read();
+    if (!m.ownerConversation || m.automated || m.sender !== this.transport.identity()?.address || note.from !== note.to ||
+      this.approverFor(note, data) === 'nobody') return;
+    note.ownerMessage = { address: m.sender, hash: note.hash };
+    note.approval = { by: 'person', actor: m.sender, at: note.updated, hash: note.hash, policyVersion: data.policy.version };
+    note.state = 'approved';
+  }
+
+  private async receiveHumanMessage(m: Received, base: Pick<Note, 'id' | 'direction' | 'from' | 'to' | 'fileIds' | 'created' | 'updated' | 'transport'>) {
+    if (m.automated) return;
+    const match = /^A2A (#[1-9][0-9]*|@[a-z][a-z0-9_-]{0,31})\r?\n([\s\S]+)$/.exec(m.text);
+    let body: string;
+    try { if (!match) throw new Error('Use A2A #task or A2A @alias on the first line, then write the message.'); body = checkBody(match[2]); }
+    catch (error) {
+      this.store.change(d => {
+        if (d.notes.some(n => n.id === base.id)) return;
+        d.notes.push({ ...base, messageId: randomUUID(), source: 'human_message', state: 'failed', subject: '(direct message could not be read)',
+          body: '', audience: 'person', threadId: randomUUID(), replyTo: null, hash: '',
+          failure: { code: 'direct_message_invalid', reason: (error as Error).message, raw: rawCopy(m.text) } });
+      }); return;
+    }
+    const note: Note = { ...base, messageId: randomUUID(), source: 'human_message', state: 'held', subject: `Slack message to ${match![1]}`,
+      body, audience: 'agent', directTarget: match![1], threadId: randomUUID(), replyTo: null, hash: '' };
+    note.hash = noteHash(note, []);
+    note.review = await review({ direction: 'incoming', subject: note.subject, body, files: [] }, this.reviewer);
+    if (note.review.verdict === 'quarantine') note.state = 'quarantined';
+    this.acceptOwnerMessage(m, note);
+    this.store.change(d => {
+      if (d.notes.some(n => n.id === base.id)) return;
+      d.notes.push(note); this.store.audit(d, 'service', 'human_message_received', note.id, note.directTarget);
     });
   }
 

@@ -9,6 +9,8 @@ export interface Received {
   conversation: string; ref: string; ts: string; channel: string; sender: string; text: string; threadTs?: string;
   // the adapter found A2A Notes data that it could not read; the core keeps the message for the person with this reason
   automated?: boolean;
+  // Slack verified that this is the signed-in member's self-conversation.
+  ownerConversation?: boolean;
   error?: string;
 }
 // What a person reads. Each adapter formats it for its own service (src/slack-format.ts for Slack).

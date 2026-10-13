@@ -37,7 +37,10 @@ export interface Note {
   // hash and never goes over the transport (src/service.ts checkMetadata)
   metadata?: Metadata;
   createdBy?: { session: string; role: Role };
-  source?: 'human_reply';
+  source?: 'human_reply' | 'human_message';
+  directTarget?: string;
+  // Only the service writes this after it checks a native Slack message in the owner's self-conversation.
+  ownerMessage?: { address: string; hash: string };
   delivery?: Delivery;
   checkpoint?: SendCheckpoint;
   transport?: { name: string; channel?: string; ts?: string; threadTs?: string; files?: Record<string, string> };
@@ -68,9 +71,9 @@ export function savePrivate(path: string, data: unknown) {
   try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
 }
 
-export function noteHash(n: Pick<Note, 'messageId' | 'to' | 'subject' | 'body' | 'audience' | 'threadId' | 'replyTo'>, files: Pick<StoredFile, 'id' | 'name' | 'size' | 'sha256' | 'kind'>[]) {
+export function noteHash(n: Pick<Note, 'messageId' | 'to' | 'subject' | 'body' | 'audience' | 'threadId' | 'replyTo' | 'directTarget'>, files: Pick<StoredFile, 'id' | 'name' | 'size' | 'sha256' | 'kind'>[]) {
   return createHash('sha256').update(JSON.stringify(['a2anotes-note/1', n.messageId, n.to, n.subject, n.body, n.audience, n.threadId, n.replyTo,
-    files.map(f => [f.kind, f.id, f.name, f.size, f.sha256])])).digest('hex');
+    files.map(f => [f.kind, f.id, f.name, f.size, f.sha256]), ...(n.directTarget ? [n.directTarget] : [])])).digest('hex');
 }
 
 const MAX_NOTES = 20_000, MAX_AUDIT = 5000, MAX_REQUESTS = 5000;

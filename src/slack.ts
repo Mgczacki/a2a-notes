@@ -346,20 +346,25 @@ export class SlackTransport implements Transport {
       conversations.push(...(list.channels || []));
       listCursor = list.response_metadata?.next_cursor || '';
     } while (listCursor);
+    const ownerChannels = new Set(conversations.filter(x => x.user === c.user).map(x => x.id));
+    const explicitHuman = (text: string) => text.startsWith('A2A Reply/1 ') || /^A2A [#@]/.test(text);
     const roots = [...new Map(threads.map(t => [`${t.channel}:${t.ts}`, t])).values()];
-    const threadKey = (t: { channel: string; ts: string }) => `slack:${c.team}:${t.channel}:thread:${t.ts}`;
+    const threadKey = (t: { channel: string; ts: string }) => `slack:${c.team}:${t.channel}:thread:${t.ts}${ownerChannels.has(t.channel) ? ':owner' : ''}`;
     roots.sort((a, b) => Number(cursors[threadKey(a)] || 0) - Number(cursors[threadKey(b)] || 0));
     for (const root of roots.slice(0, MAX_CONVERSATIONS_PER_SCAN)) {
+      const selfChannel = ownerChannels.has(root.channel);
+      // A separate cursor reads owner replies that older versions skipped.
       const key = threadKey(root), scanAt = (Date.now() / 1000).toFixed(6);
       try {
         let cursor = '';
         do {
           const page = await this.call('conversations.replies', { channel: root.channel, ts: root.ts, oldest: cursors[key] || root.ts, latest: scanAt, limit: '100', ...(cursor ? { cursor } : {}) });
           for (const event of (page.messages || []).sort((a: any, b: any) => Number(a.ts) - Number(b.ts))) {
-            if (Number(event.ts) <= Number(cursors[key] || root.ts) || event.ts === root.ts || event.user === c.user || !event.user || typeof event.text !== 'string' || event.subtype && event.subtype !== 'thread_broadcast') continue;
+            if (Number(event.ts) <= Number(cursors[key] || root.ts) || event.ts === root.ts || (event.user === c.user && !selfChannel) || !event.user || typeof event.text !== 'string' || event.subtype && event.subtype !== 'thread_broadcast') continue;
             const read = readSlackText(event.text);
+            if (selfChannel && (event.user !== c.user || event.app_id || event.bot_id || !('text' in read) || !explicitHuman(read.text))) continue;
             await handle({ conversation: `slack:${c.team}:${root.channel}`, ref: `slack:${c.team}:${root.channel}:${event.ts}`,
-              ts: String(event.ts), channel: root.channel, sender: slackAddress(c.team, String(event.user)), automated: !!(event.app_id || event.bot_id),
+              ts: String(event.ts), channel: root.channel, sender: slackAddress(c.team, String(event.user)), automated: !!(event.app_id || event.bot_id), ownerConversation: selfChannel,
               text: 'text' in read ? read.text : event.text, ...('error' in read ? { error: read.error } : {}), threadTs: root.ts });
             save(key, String(event.ts));
           }
@@ -374,13 +379,15 @@ export class SlackTransport implements Transport {
     let messages = 0, scanned = 0;
     let failure: TransportError | undefined;
     const now = Date.now() / 1000;
-    const key = (conversation: any) => `slack:${c.team}:${conversation.id}`;
+    const key = (conversation: any) => `slack:${c.team}:${conversation.id}${conversation.user === c.user ? ':owner' : ''}`;
     // Slack's `updated` field does not change when a message arrives, so it cannot skip a conversation.
     // Each scan reads the conversations with the oldest cursor first: new conversations, then the longest unread.
-    const candidates = conversations.filter(conversation => conversation.id && conversation.user && !conversation.is_user_deleted && (conversation.user !== c.user || this.config.allowSelf))
+    const candidates = conversations.filter(conversation => conversation.id && conversation.user && !conversation.is_user_deleted)
       .sort((a, b) => Number(cursors[key(a)] || 0) - Number(cursors[key(b)] || 0)).slice(0, MAX_CONVERSATIONS_PER_SCAN);
     for (const conversation of candidates) {
       try {
+        const selfChannel = conversation.user === c.user;
+        // Keep self-message controls separate from the old wire-message cursor.
         const k = key(conversation);
         // the first scan of a conversation reads only the recent days, not the whole history
         let from = Number(cursors[k] || now - (this.config.firstScanDays ?? 14) * 86_400);
@@ -397,11 +404,12 @@ export class SlackTransport implements Transport {
             // this account's own posts in a conversation with another member are sent messages, not received ones
             const own = event.user === c.user && conversation.user !== c.user;
             // a post with a user token through an app has bot_id and app_id; the member in `user` is the sender
-        if (ordinary && !own && event.user && typeof event.text === 'string') {
+            if (ordinary && !own && event.user && typeof event.text === 'string') {
               const read = readSlackText(event.text);
-              if ('text' in read && !read.text.startsWith('A2ANotes') && !read.text.startsWith('A2A Reply/1 ')) continue;
+              if (selfChannel && (event.user !== c.user || event.app_id || event.bot_id || !('text' in read) || !explicitHuman(read.text))) continue;
+              if ('text' in read && !read.text.startsWith('A2ANotes') && !explicitHuman(read.text)) continue;
               await handle({ conversation: k, ref: `slack:${c.team}:${conversation.id}:${event.ts}`, ts: String(event.ts), channel: conversation.id,
-                sender: slackAddress(c.team, String(event.user)), automated: !!(event.app_id || event.bot_id), text: 'text' in read ? read.text : event.text, ...('error' in read ? { error: read.error } : {}),
+                sender: slackAddress(c.team, String(event.user)), automated: !!(event.app_id || event.bot_id), ownerConversation: selfChannel, text: 'text' in read ? read.text : event.text, ...('error' in read ? { error: read.error } : {}),
                 ...(event.thread_ts ? { threadTs: String(event.thread_ts) } : {}) });
               messages++;
               save(k, String(event.ts));

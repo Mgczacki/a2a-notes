@@ -163,6 +163,40 @@ Slack cooldowns use the configured Slack client ID and workspace ID for each Web
 
 The service permits one process to own each data folder. Graceful shutdown waits for active requests. Existing queue records retain their saved deadline during upgrade. A legacy interrupted send requires reconciliation because its store has no upload checkpoints.
 
+## Direct human messages in Slack
+
+Write the destination on the first line. Write the message on the next line.
+
+```text
+A2A #430
+Please check the current status.
+```
+
+Taskboard supports these destinations:
+
+- `#430` selects local task number 430.
+- `@controller` selects the local controller.
+- `@research` selects an alias that the user registered in Settings, under Integrations.
+
+Use `A2A @controller` or `A2A @research` as the first line for those destinations.
+The service stores `source: human_message` and `direct_target` from that explicit first line.
+It sets the audience to `agent`. It stores human text without a generated agent file.
+The destination is part of the content hash. Ordinary Slack text and mentions stay outside this flow.
+
+Your native messages in your Slack self-conversation need no acceptance card.
+Slack must identify you as the signed-in member. The conversation must be your self-conversation.
+App posts and bot posts cannot use this rule.
+Message checks and current policy still apply. Quarantine and policy failures stop acceptance.
+The service records acceptance for the exact hash and current policy.
+Taskboard resolves the destination against active local tasks and saves it before delivery.
+An alias change cannot move that saved message to another task.
+An unknown target goes to triage. It does not start another task.
+
+Other senders keep the current acceptance rules.
+Their destination text requests a target. The owner must choose or approve that local target.
+A message never approves a draft or an action that needs separate approval.
+These direct messages contain text only. This feature does not import native Slack attachments.
+
 ## Explicit human replies in Slack
 
 The Slack footer displays the exact first line for a reply. A person can submit that line in the direct message conversation or its thread.
@@ -179,7 +213,10 @@ The UUID identifies the original note. The receiver verifies these facts before 
 - The reply arrives in the original direct message conversation.
 - Any thread reference matches the original Slack thread.
 
-The stored reply has `source: human_reply`. It retains the original audience. It contains human text and no generated agent request. It receives the usual incoming content check and approval requirements. Ordinary Slack text stays outside the inbox. A reply never approves actions.
+The stored reply has `source: human_reply`. It retains the original audience. It contains human text and no generated agent request. It receives the usual incoming content check and approval requirements.
+A verified native reply from your account in your self-conversation needs no acceptance card.
+This rule keeps the original audience and verified originating task.
+The `allowSelf` setting still controls outgoing self-sends. It does not stop native owner replies. Ordinary Slack text stays outside the inbox. A reply never approves actions.
 
 `reply_to_local` exposes only the verified original note and its local metadata. Clients can use that metadata to find the originating task. Reply text cannot supply a task ID.
 
