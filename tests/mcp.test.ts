@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { startService } from '../src/daemon.ts';
+import { startTestService as startService } from './helpers.ts';
 import { savePrivate } from '../src/store.ts';
 import { sha256, writeAgentFile } from '../src/protocol.ts';
 import { ALEX, MARIO, agentRequest, fakeWorkspace, slackConfig } from './helpers.ts';
@@ -83,7 +83,14 @@ test('tools and resources follow the session role, and two clients share one sto
   assert.equal(review.approver, 'reviewer');
   assert.equal((await call(controller, 'a2anotes_approve', { id, expected_hash: draft.hash, decision: 'approve' })).state, 'queued');
   assert.equal((await call(agentA, 'a2anotes_send', { id, expected_hash: draft.hash, request_id: `r-${randomUUID()}` })).error.code, 'forbidden');
-  assert.equal((await call(controller, 'a2anotes_send', { id, expected_hash: draft.hash, request_id: `r-${randomUUID()}` })).state, 'sent');
+  const sending = await call(controller, 'a2anotes_send', { id, expected_hash: draft.hash, request_id: `r-${randomUUID()}` });
+  if (sending.isError) assert.equal(sending.error.code, 'send_in_progress');
+  let sent = await call(controller, 'a2anotes_get_message', {id});
+  for (const deadline = Date.now() + 5000; sent.state !== 'sent' && Date.now() < deadline;) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    sent = await call(controller, 'a2anotes_get_message', {id});
+  }
+  assert.equal(sent.state, 'sent', JSON.stringify(sent));
 
   const policy = await resource(agentA, 'a2anotes://policy');
   assert.equal(policy.incoming, 2);
@@ -140,23 +147,15 @@ test('the stdio bridge connects a command-line agent to the running service', as
   await client.close();
 });
 
-test('a person session gets a Slack sign-in link that returns to a local page, and healthz reports the version', async () => {
-  const health = await (await fetch(`${alex.running.server.url}/healthz`)).json();
-  assert.deepEqual(health, { ok: true, version: '0.10.0' });
+test('OAuth tools and callbacks are absent, and healthz reports the app-only version', async () => {
+  assert.deepEqual(await (await fetch(`${alex.running.server.url}/healthz`)).json(), {ok: true, version: '0.11.0'});
   const human = await connect(alex.url, alex.token('signin-person', 'person'));
   const agentClient = await connect(alex.url, alex.token('signin-agent', 'agent'));
-  assert.ok(!(await agentClient.listTools()).tools.some(t => t.name === 'a2anotes_slack_sign_in'), 'only a person session can start a sign-in');
-  const refused = await call(human, 'a2anotes_slack_sign_in', { return_to: 'https://evil.example/' });
-  assert.equal(refused.error.code, 'invalid_input');
-  const link = await call(human, 'a2anotes_slack_sign_in', { return_to: 'http://127.0.0.1:4317/#inbox' });
-  // the fake Slack authorize page lists one sign-in link for each member; follow the one for Alex
-  const page = await (await fetch(link.url)).text();
-  const target = /href="([^"]+)">Sign in as Alex/.exec(page)![1].replace(/&amp;/g, '&');
-  const callback = new URL(target);
-  const back = await fetch(`${alex.running.server.url}${callback.pathname}${callback.search}`, { redirect: 'manual' });
-  assert.equal(back.status, 303);
-  assert.equal(back.headers.get('location'), 'http://127.0.0.1:4317/#inbox');
-  for (const c of [human, agentClient]) await c.close();
+  for (const c of [human, agentClient]) {
+    assert.ok(!(await c.listTools()).tools.some(t => t.name === 'a2anotes_slack_sign_in'));
+    await c.close();
+  }
+  assert.equal((await fetch(`${alex.running.server.url}/slack/callback?code=unused`)).status, 404);
 });
 
 test('a received message shows the sender name from Slack', async () => {

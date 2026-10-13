@@ -2,7 +2,7 @@ import type { SendCheckpoint, AgentDeliveryStatus } from './store.ts';
 // The contract between the protocol core (src/service.ts) and a delivery service. The core stores stable message
 // and attachment IDs. An adapter maps them to its own IDs, checks identities, and moves text and file bytes.
 export interface Person { address: string; name: string; realName: string; title: string; active: boolean; email?: string; image?: string }
-export interface Identity { transport: string; address: string; name: string; scopes: string[]; missingScopes: string[]; optionalMissing: string[] }
+export interface Identity { transport: string; address: string; name: string; scopes: string[]; missingScopes: string[]; optionalMissing: string[]; available?: boolean }
 
 // One message that the adapter read from the service. text is the message text after markup escapes are reversed.
 export interface Received {

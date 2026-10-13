@@ -1,16 +1,30 @@
 # Changelog
 
+## 0.11.0
+
+- Combine the app-only transport with optional native SDK posting.
+- Keep app account binding and acknowledgement without OAuth.
+- Check the native API code and current account before posting.
+- Store native attempts and receipts before returning delivery results.
+- Give each native request one SDK attempt and let A2A Notes control retries.
+- Keep Retry-After across restart and recover uncertain posts without a duplicate.
+- Preserve small inline attachments in the original message.
+- Keep app controls as the fallback only before a known native attempt.
+- Preserve current human replies and approval rules.
+
 ## 0.10.0
 
-- Add an optional preference for sending approved notes through the installed Slack app.
-- Verify the native API code before it sends. Unknown code uses the existing API path before any native attempt.
-- Preserve the current wire text and displayed blocks. Keep sender checks and file checkpoints.
-- Give each native request one SDK attempt. A2A Notes controls further attempts under the current approval rules.
-- Store native attempts and receipts before returning delivery results.
-- Preserve native Retry-After across restart. Do not switch adapters after uncertain delivery.
-- Read the displayed Slack wrapper in native events. Ignore outgoing echoes as incoming instructions.
-- Show native send availability in connection status.
+- Replace production Slack Web API operations with desktop app operations.
+- Bind the account without reading OAuth credentials.
+- Verify app views before sending text or acknowledging receipt.
+- Confirm outgoing message IDs and existing reactions through app records.
+- Remove OAuth tools and callbacks.
+- Preserve old data and credentials for rollback.
+- Carry small attachments in the original message and verify their sender and hash.
+- Fail oversized attachments before posting.
+- Keep loopback API fixtures for protocol regression tests only.
 
+## 0.9.0
 
 - Add generic receipt acknowledgement through `a2anotes_ack`.
 - Store native intake and pending acknowledgement in one write.

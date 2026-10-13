@@ -97,8 +97,8 @@ async function load() {
     el('span', { class: 'status ' + (c.signed_in ? 'ok' : 'wait') }, c.signed_in ? 'connected' : 'not connected'),
     el('span', { class: 'small' }, 'Last scan: ' + (c.last_scan_at || 'never') + (c.stale ? ' (the inbox may be out of date)' : '')),
     c.last_error ? el('span', { class: 'status bad' }, c.last_error) : null,
-    c.missing_scopes.length ? el('span', { class: 'status bad' }, 'Missing Slack scopes: ' + c.missing_scopes.join(', ')) : null,
-    c.signed_in ? el('button', { onclick: act(() => api('/api/slack/disconnect', {})) }, 'Disconnect Slack') : el('button', { class: 'primary', onclick: act(async () => { location.href = (await api('/api/slack/connect', {})).url; }) }, 'Connect Slack')].filter(Boolean));
+    c.missing_scopes.length ? el('span', { class: 'status bad' }, 'Missing App connection: ' + c.missing_scopes.join(', ')) : null,
+    c.signed_in ? el('button', { onclick: act(() => api('/api/slack/disconnect', {})) }, 'Disconnect Slack') : el('button', { class: 'primary', onclick: act(async () => { await api('/api/slack/connect', {}); await load(); }) }, 'Connect Slack Desktop')].filter(Boolean));
   const level = (name, value) => el('label', {}, name + ' ', el('select', { 'aria-label': name, onchange: undefined }, [1, 2, 3].map(n => el('option', { value: n, selected: n === value }, 'Level ' + n))));
   const inLevel = level('Incoming', s.policy.incoming), outLevel = level('Outgoing', s.policy.outgoing);
   inLevel.querySelector('select').onchange = act(() => api('/api/policy', { incoming: Number(inLevel.querySelector('select').value) }));

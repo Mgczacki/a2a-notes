@@ -246,7 +246,7 @@ export class SlackDesktopHook {
       for (const [id, socket] of this.sockets) if (!active.has(id)) socket.close();
       for (const target of targets) if (!this.stopped && !this.sockets.has(target.id)) await this.attach(target, match[1], match[2]);
       if (!targets.length) this.statusValue.error = 'Open the connected workspace in Slack Desktop.';
-    } catch { this.statusValue.error = 'Slack Desktop debugging is not reachable. Existing history recovery remains available.'; }
+    } catch { this.statusValue.error = 'Slack Desktop debugging is not reachable. App message recovery remains available.'; }
     finally { this.connecting = false; this.state(); }
   }
   private async attach(target: Target, team: string, owner: string) {
@@ -291,7 +291,7 @@ export class SlackDesktopHook {
         if (event.user === owner && (event.text.startsWith('A2ANotes') || event.text.includes(DATA_MARKER))) return;
       }
       if (!event || this.queue.some(x => x.team === team && x.event.channel === event.channel && x.event.ts === event.ts)) return;
-      if (this.queue.length >= 1000) { this.statusValue.error = 'The desktop event queue is full. History recovery remains available.'; return; }
+      if (this.queue.length >= 1000) { this.statusValue.error = 'The desktop event queue is full. App message recovery remains available.'; return; }
       // The existing service checks channel membership before this event receives owner acceptance.
       this.queue.push({ event, team, owner, attempts: 0, nextAt: 0 }); this.save();
       this.statusValue.lastEventAt = new Date().toISOString(); void this.drain();
@@ -330,7 +330,7 @@ export class SlackDesktopHook {
         } catch (error) {
           const transport = error instanceof TransportError ? error : undefined;
           if (transport?.definite && !transport.rateLimited || ++item.attempts >= 8) {
-            this.queue = this.queue.filter(x => x !== item); this.statusValue.error = 'A desktop event could not be checked. History recovery remains available.';
+            this.queue = this.queue.filter(x => x !== item); this.statusValue.error = 'A desktop event could not be checked. App message recovery remains available.';
           } else {
             item.nextAt = Date.now() + Math.max(transport?.retryAfter || 0, Math.min(300, 2 ** item.attempts * (0.5 + Math.random()))) * 1000;
             this.statusValue.error = 'A desktop event is waiting for its next check.';

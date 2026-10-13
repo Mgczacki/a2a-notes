@@ -276,7 +276,7 @@ test('a legacy queue resumes the saved deadline and checks uncertain earlier wri
 });
 
 test('one service owns a data folder and graceful shutdown releases that folder', async t => {
-  const { startService } = await import('../src/daemon.ts');
+  const { startTestService: startService } = await import('./helpers.ts');
   const { mkdtempSync, existsSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');

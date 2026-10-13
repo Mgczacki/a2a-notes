@@ -104,14 +104,7 @@ This body has these problems:
 
 ## How Slack shows a message
 
-The Slack adapter (`src/slack-format.ts`) builds these blocks:
-
-- a header with the subject, cut at 150 characters
-- a context line with the reader and the sender name
-- the body as `rich_text` blocks, one block for each titled part
-- a context line with the agent file and the other files
-- a footer about replies
-
-A `rich_text` block holds at most 2,900 characters. A longer part splits between paragraphs, between sentences, or between list items. A split never falls inside a word, a link, or code. A numbered list keeps its numbers after a split. A message has at most 50 blocks. When the parts need more blocks, they share blocks. When the body still does not fit, the last block says that the rest is in A2A Notes.
-
-The `text` field of the Slack message is not what the reader sees. It holds a one-line summary for notifications and the exact A2ANotes/1 text for the receiving service.
+The app connector shows the subject and body as text.
+The footer explains how to reply and what acknowledgement means.
+The final data line carries the exact protocol text for the receiving agent.
+The app connector does not create rich text blocks through the Web API.

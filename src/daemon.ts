@@ -11,6 +11,7 @@ import { startHttp } from './http.ts';
 import { NotesService } from './service.ts';
 import { SlackTransport, type SlackConfig } from './slack.ts';
 import { SlackDesktopHook, desktopURL, type DesktopConfig } from './slack-desktop.ts';
+import type { Transport } from './transport.ts';
 import { savePrivate, Store } from './store.ts';
 
 export interface Config {
@@ -30,15 +31,16 @@ export function readConfig(dir: string): Config {
   if (!existsSync(file)) throw new Error(`No config.json in ${dir}. Run a2a-notes init first.`);
   const config = JSON.parse(readFileSync(file, 'utf8')) as Config;
   if (!Number.isInteger(config.port) || config.port < 0 || config.port > 65535) throw new Error('config.json needs a port.');
-  if (!config.slack?.clientId || !config.slack.teamId || !config.slack.redirectUri) throw new Error('config.json needs slack.clientId, slack.teamId, and slack.redirectUri.');
+  if (!/^T[A-Z0-9]+$/.test(config.slack?.teamId)) throw new Error('config.json needs slack.teamId.');
+  desktopURL(config.desktop?.url || config.slack.desktopUrl || 'http://127.0.0.1:19322');
   if (config.desktop) desktopURL(config.desktop.url);
-  if (config.desktop?.send !== undefined && typeof config.desktop.send !== 'boolean') throw new Error('desktop.send must be true or false.');
+  if (config.desktop?.send !== undefined && typeof config.desktop.send !== 'boolean') throw new Error('desktop.send must be a boolean.');
   return config;
 }
 
-export interface Running { service: NotesService; server: Server & { url: string }; clients: Clients; slack: SlackTransport; close(): Promise<void> }
+export interface Running { service: NotesService; server: Server & { url: string }; clients: Clients; slack: Transport; close(): Promise<void> }
 
-export async function startService(dir: string, overrides: Partial<Config> = {}, fetcher?: typeof fetch, onStop?: () => void): Promise<Running> {
+export async function startService(dir: string, overrides: Partial<Config> = {}, fetcher?: typeof fetch, onStop?: () => void, dependencies: {transport?: Transport} = {}): Promise<Running> {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const config = { ...readConfig(dir), ...overrides };
   const lockFile = join(dir, 'service.lock');
@@ -67,15 +69,20 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
   try { writeFileSync(fd, String(process.pid)); fsyncSync(fd); } finally { closeSync(fd); }
   let service: NotesService | undefined;
   let desktop: SlackDesktopHook | undefined;
+  let refresh: ReturnType<typeof setInterval> | undefined;
   try {
     const store = new Store(dir);
-    const slack = new SlackTransport(join(dir, 'slack-credentials.json'), config.slack, fetcher);
+    const slack = dependencies.transport || new SlackTransport(join(dir, 'slack-app-account.json'), {...config.slack, desktopUrl: config.desktop?.url || config.slack.desktopUrl}, fetcher);
+    if (slack instanceof SlackTransport) {
+      await slack.refresh().catch(() => {});
+      refresh = setInterval(() => {void slack.refresh().catch(() => {});}, 10_000); refresh.unref();
+    }
     service = new NotesService({ store, transport: slack, reviewer: config.reviewCommand?.length ? commandReviewer(config.reviewCommand) : undefined,
       bodyChecker: config.bodyCheckCommand?.length ? commandBodyChecker(config.bodyCheckCommand) : undefined,
       stagingDir: config.stagingDir, scanIntervalMs: (config.scanIntervalSeconds ?? 60) * 1000 });
-    if (config.desktop) {
+    if (slack instanceof SlackTransport) {
       const owner = service;
-      desktop = new SlackDesktopHook({ config: config.desktop, dir,
+      desktop = new SlackDesktopHook({ config: {url: config.desktop?.url || config.slack.desktopUrl || 'http://127.0.0.1:19322', ...(config.desktop?.send ? {send:true} : {})}, dir,
         identity: () => slack.identity(), verifyChannel: channel => slack.verifyDesktopChannel(channel),
         receive: event => owner.receive(event), connection: active => owner.setDesktopListening(active) });
       service.desktopStatus = () => desktop!.status();
@@ -86,13 +93,14 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
     const secretFile = join(dir, 'local-secret');
     const secret = randomBytes(32).toString('base64url');
     savePrivate(secretFile, secret);
-    const server = await startHttp({ service, clients, port: config.port, host: config.host, slack, onStop,
+    const server = await startHttp({ service, clients, port: config.port, host: config.host, ...(slack instanceof SlackTransport ? {slack} : {}), onStop,
       local: given => { const a = Buffer.from(given), b = Buffer.from(secret); return a.length === b.length && timingSafeEqual(a, b); } });
     service.start(); desktop?.start();
     savePrivate(join(dir, 'service.json'), { url: server.url, pid: process.pid, started: new Date().toISOString() });
     return {
       service, server, clients, slack,
       close: async () => {
+        clearInterval(refresh);
         await desktop?.close();
         await service!.stop();
         return new Promise(resolve => {
@@ -103,6 +111,7 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
       },
     };
   } catch (error) {
+    clearInterval(refresh);
     await desktop?.close();
     await service?.stop();
     try { unlinkSync(lockFile); } catch { /* already removed */ }

@@ -13,3 +13,5 @@ export { startService, readConfig, defaultDir, type Config } from './daemon.ts';
 export { runBridge } from './bridge.ts';
 
 export { SlackDesktopHook, desktopURL, desktopEvent, type DesktopConfig, type DesktopStatus } from './slack-desktop.ts';
+
+export { SlackAppConnection, rendererSnapshot, rendererAction, type AppConnection, type AppSnapshot } from './slack-app.ts';

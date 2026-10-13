@@ -231,12 +231,12 @@ export class NotesService {
 
   identity() {
     const id = this.transport.identity();
-    return id ? { transport: id.transport, address: id.address, name: id.name, connected: !id.missingScopes.length, scopes: id.scopes } : { transport: this.transport.name, connected: false };
+    return id ? { transport: id.transport, address: id.address, name: id.name, connected: id.available !== false && !id.missingScopes.length, scopes: id.scopes } : { transport: this.transport.name, connected: false };
   }
   connectionStatus() {
     const id = this.transport.identity(), health = this.store.read().health;
     const stale = !health.lastSuccessAt || Date.now() - Date.parse(health.lastSuccessAt) > 5 * 60_000;
-    return { transport: this.transport.name, signed_in: !!id, address: id?.address ?? null, missing_scopes: id?.missingScopes ?? [], optional_missing: id?.optionalMissing ?? [],
+    return { transport: this.transport.name, signed_in: !!id, available: id?.available !== false && !!id, address: id?.address ?? null, missing_scopes: id?.missingScopes ?? [], optional_missing: id?.optionalMissing ?? [],
       last_scan_at: health.lastScanAt ?? null, last_success_at: health.lastSuccessAt ?? null, last_error: health.lastError ?? null,
       rate_limited_until: health.rateLimitedUntil && Date.parse(health.rateLimitedUntil) > Date.now() ? health.rateLimitedUntil : null, stale, ...(this.desktopStatus ? { desktop: this.desktopStatus() } : {}) };
   }

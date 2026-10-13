@@ -12,29 +12,34 @@ The wire format is `A2ANotes/1`. The agent file format is `a2anotes.request/1`. 
 - `src/checks.ts`: the body check for outgoing drafts and the content check for both directions.
 - `src/policy.ts`: approval levels 1, 2, and 3.
 - `src/service.ts`: drafts, files, approvals, sends, the inbox, and the Slack scan.
-- `src/slack.ts`: the Slack transport adapter. It uses a Slack user token and OAuth with PKCE.
+- `src/slack.ts`: the Slack transport adapter. It uses the signed-in Slack Desktop app without Web API calls.
 - `src/mcp.ts` and `src/http.ts`: the MCP server on loopback Streamable HTTP, the review page, and the page API.
 - `src/bridge.ts`: a stdio bridge for command-line agents.
 - `src/fake-slack.ts`: a fake Slack Web API for tests and sandboxes.
-- `src/slack-desktop.ts`: an optional connector for native Slack Desktop events on macOS.
+- `src/slack-desktop.ts`: a connector for native Slack Desktop events on macOS.
 
-See [Slack Desktop setup](docs/SLACK-DESKTOP.md) to receive live events without desktop clicks or screenshots.
+See [Slack Desktop setup](docs/SLACK-DESKTOP.md) for account connection and app requirements.
 The connector keeps the existing sender checks and action approval rules.
 
 ## Install and start
 
-These steps need a Slack app with user token scopes. The Slack app must list `http://localhost:<port>/slack/callback` as a redirect URL.
+Slack Desktop must run on macOS with a loopback debugging port.
+No registered Slack app or OAuth token is required.
 
-1. Install the package from this repository: `git clone https://github.com/Mgczacki/a2a-notes.git`, then run `pnpm install`, `pnpm build`, and `npm link` in the folder. The package is not on npm.
-2. Write the settings: `a2a-notes init --client-id <Slack client ID> --team-id <Slack team ID> --port 4460`.
-3. Start the service: `a2a-notes serve`. The service prints its address.
-4. Open the review page: `a2a-notes open`. The link works once, within two minutes.
-5. On the review page, select **Connect Slack** and sign in.
-6. Make one client token for each client: `a2a-notes token add <name> --role person|reviewer|agent`. The command prints the token once.
+- Install the package with `pnpm install` and `pnpm build`.
+- Write settings with `a2a-notes init --team-id <Slack workspace ID> --port 4460`.
+- Start the service with `a2a-notes serve`.
+- Open the review page with the link from `a2a-notes open`.
+- Use Connect Slack Desktop to verify the signed-in app account.
 
-To start the service at sign-in on macOS, run `a2a-notes service-file`. It prints a LaunchAgent file and the `launchctl` command. The command does not install the file.
+The default app endpoint is `http://127.0.0.1:19322`.
+Use `--desktop-url` during init to change it.
+See `docs/SLACK-DESKTOP.md` for the app start command.
 
-The data folder is `~/.a2a-notes`, or the folder in `A2A_NOTES_DIR`, or `--dir`. It holds `config.json`, `store.json`, `clients.json`, `slack-credentials.json`, `files/`, and `local-secret`. Each file has mode 0600.
+The data folder defaults to `~/.a2a-notes`.
+`A2A_NOTES_DIR` and `--dir` can select another folder.
+The account binding lives in `slack-app-account.json` and contains no credentials.
+The package ignores old `slack-credentials.json` files and preserves them for rollback.
 
 ## Connect an agent
 
@@ -140,32 +145,30 @@ A client can attach `metadata` to a draft in `a2anotes_create_draft` and `a2anot
 
 ## Sending and delivery
 
-An outgoing approval stores the note as `queued` before any network write. The worker reads that state after restart. `a2anotes_send` attempts a queued note when its saved deadline permits delivery.
+Outgoing approval stores the note as `queued` before the app acts.
+The worker checks the saved approval and content hash before each attempt.
+The adapter verifies the workspace and account before each app operation.
+It confirms the recipient from the app's direct message view.
+It refuses to replace an existing composer draft.
 
-The first Slack 429 sets the next attempt from `Retry-After`. Later 429 responses use capped exponential backoff with jitter. The backoff cap is 300 seconds. `Retry-After` can require a longer wait. Eight failed attempts stop delivery in `permanent_failure`. A local quota wait does not consume that attempt limit.
+The adapter saves `postStarted` before it clicks Send.
+The app must show the matching message ID before delivery becomes `sent`.
+After an uncertain post, the adapter searches displayed messages for that ID.
+It never repeats an uncertain post.
 
-Each note exposes its `delivery` record. That record includes these fields:
+The service retains its retry deadlines and attempt limit.
+The app transport does not use HTTP status codes or Slack method quotas.
+Existing queue records remain readable.
+Small attachments travel as encoded data in the original message.
+The adapter checks the original sender and message reference before it returns attachment bytes.
+The protocol still checks each attachment hash.
+A complete app message must fit within 39,000 bytes.
+Larger attachments fail before posting.
+Older API file references cannot be downloaded through this connector.
+Old files remain in the local store.
 
-- `nextAttemptAt`: the next permitted attempt time.
-- `lastMethod`: the Slack method that failed or required a local wait.
-- `lastStatus`: the HTTP status. Zero means the adapter delayed the call locally.
-- `lastRetryAfter`: Slack's requested wait, in seconds.
-- `lastRequestId`: Slack's request ID, when available.
-- `stoppedAt`: the time of the final failure.
-- `failureCode`: the final failure code.
-- `uncertain`: Slack may have accepted the message.
-
-`next_retry_at` remains an alias for the next attempt time. Existing `sent_at` and `permanent_failure` fields retain their meanings.
-
-The worker checks the current policy before each attempt. It checks the sender address and each approved file hash. Invalid credentials stop delivery. Changed content stops delivery. The service does not ask for another approval of unchanged queued text.
-
-The adapter saves an upload ticket before sending file bytes. It saves `completing` before sharing the file. A retry reuses that Slack file ID. An uncertain share requires `files.info` to confirm the share. The adapter never repeats an uncertain file share.
-
-The adapter saves `postStarted` before `chat.postMessage`. After an uncertain post, it searches for the same message ID. It saves each history cursor, so a 429 or restart resumes the search. It does not post again while delivery remains uncertain. A missing confirmation can therefore end in a final uncertain failure.
-
-Slack cooldowns use the configured Slack client ID and workspace ID for each Web API method. Message posting also reserves one second for each channel. A cooldown for one method does not block other methods.
-
-The service permits one process to own each data folder. Graceful shutdown waits for active requests. Existing queue records retain their saved deadline during upgrade. A legacy interrupted send requires reconciliation because its store has no upload checkpoints.
+One service process owns each data folder.
+Graceful shutdown waits for active requests.
 
 ## Direct human messages in Slack
 
@@ -229,20 +232,24 @@ The scan reads at most 40 tracked threads each time. A saved cursor keeps a repl
 
 ## Slack display
 
-Each transport adapter formats messages for its own service. `src/slack-format.ts` does this for Slack.
-
-- People read the blocks: the subject as a header, a line of small text with the reader and the sender, the body, the agent file and other files, and a small footer about replies with a **Get A2A Notes** link. The link goes to `slack.projectLink` in `config.json` (default: this repository). An empty value hides the link.
-- The body shows as `rich_text` blocks: a bold title for each titled part, paragraphs, line breaks, lists, quotes, preformatted text, and https links. `src/body-format.ts` reads the body format. A text element in a `rich_text` block is literal text, so no mention or Slack markup in the body becomes active. Version 0.3.0 put the body in a `plain_text` section, and the Slack desktop app showed it as one paragraph without line breaks (observed on 2026-10-02).
-- Each body block holds at most 2,900 characters. A message has at most 50 blocks. A long part splits between paragraphs, sentences, or list items, never inside a word, a link, or code.
-- The `text` field holds a one-line summary for notifications, then `A2A Notes data: ` and the exact `A2ANotes/1` text as one JSON string. Slack shows `text` only in notifications and search when a message has blocks.
-- Slack replaces each newline in `text` with a space when a message has blocks. This was observed in a live test on 2026-09-30. A JSON string has no raw newline, so the exact text survives. The receiver parses the JSON string, then the `A2ANotes/1` text.
-- Text without the data marker goes to the decoder as it is, so an `A2ANotes/1` post without blocks still arrives.
-
-A post with a user token through a Slack app has `bot_id` and `app_id` set. The scan accepts it and takes the sender from the event `user`.
+The app connector composes a readable subject and body.
+The footer gives the explicit reply marker and acknowledgement meaning.
+The final line contains the exact protocol text as a JSON string.
+JSON escapes preserve machine content without active mention text.
+The app connector does not create Web API blocks.
+Older messages with blocks remain readable through their saved data marker.
 
 ## Scanning and restart
 
-The service scans direct messages every 60 seconds by default. Each scan reads at most 40 conversations, oldest cursor first. With more than 40 conversations, a new message can wait more than one scan. The first scan of a conversation reads the last 14 days (`slack.firstScanDays`). The service reads history in time windows and cuts a window with more than 2000 messages in half. It saves a cursor after it stores and checks each message and after each window. A conversation that Slack lists but the token cannot read (`channel_not_found`, `not_in_channel`, `access_denied`) gets a cursor at the scan time and no error. A failed download stops that conversation without a cursor change, so the next scan reads the message again. A Slack rate limit delays the next scan and shows in `a2anotes_connection_status`.
+The connector receives explicit messages from verified native app events.
+It stores each event before message intake.
+It verifies direct message membership through the app view.
+Self-conversation requests require the signed-in account as sender.
+App recovery reads currently displayed message records.
+It can read older records that load after newer records.
+The protocol store removes duplicate delivery by the original Slack message reference.
+This version does not recover a complete workspace history.
+The app must reopen its native connection while the connector listens to supply live events.
 
 ## Checks
 
@@ -259,7 +266,10 @@ A rejection with `review_context` keeps that text as `rejected.comment`, so the 
 
 ## People
 
-`a2anotes_get_person` gives the name, the title, and the address of the profile picture of a workspace member. A client downloads the picture itself. The Slack picture addresses need no token.
+People search uses profiles available in the current app view.
+It does not export the workspace directory or search email through an API.
+Open the recipient in Slack before using an explicit member address.
+The adapter verifies the active recipient from the app's direct message view.
 
 ## Clients
 
@@ -267,13 +277,17 @@ Any MCP client can use this service: a command-line agent through `a2a-notes bri
 
 ## Tests
 
-`pnpm test` runs the tests against the fake Slack Web API. No test needs a live Slack account.
+`pnpm test` runs without a live Slack account.
+App tests use a local app connection fixture and rendered component fixtures.
+Protocol regression tests use `FakeSlackTransport` against a loopback simulator.
+That adapter rejects remote API endpoints and never runs in the normal service.
 
 ## Open items
 
-- The package has no registered Slack app of its own. `a2a-notes init` takes the client ID and team of the Slack app that you use.
-- The fixed body rules flag detail names from the agent file, code names, internal task numbers, local paths, secrets, sender notes, and an ask that differs from the `instruction` input.
-- The first release supports one Slack workspace. It does not send between workspaces.
+- Verify sends and reactions against the installed Slack app before release.
+- Add native app file controls for larger attachments.
+- Add recovery beyond messages available in the app.
+- Support workspace directory search through app controls.
 
 ## Acknowledge receipt
 
@@ -284,8 +298,8 @@ A person can acknowledge a held note. Agents can acknowledge only approved conte
 
 Verified native human replies and direct messages queue acknowledgement in the same write that stores the note.
 Failed or quarantined input receives no automatic acknowledgement.
-Slack adds ✅ to that exact post with `reactions.add`.
-The recipient account needs `reactions:write`. Reconnect Slack after the app grants this scope.
+Slack adds ✅ through the app reaction control for the saved message.
+The adapter requires the app to show that reaction from the bound account.
 Set `slack.acknowledgementEmoji` to a Slack emoji name to change the reaction. The default is `white_check_mark`.
 
 The note exposes `acknowledgement` with its status and error.

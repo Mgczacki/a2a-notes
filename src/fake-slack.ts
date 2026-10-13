@@ -233,3 +233,5 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
     close: () => new Promise(resolve => { server.closeAllConnections(); server.close(() => resolve()); }),
   };
 }
+
+export { FakeSlackTransport } from './fake-slack-transport.ts';

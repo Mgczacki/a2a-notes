@@ -67,7 +67,7 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
       const server = createMcpServer(service, session, { pageLink, authorized: () => {
         const current = clients.session(authorization);
         return !!current && current.name === session.name && current.role === session.role && current.humanApproval === session.humanApproval;
-      }, ...(options.slack ? { slackSignIn: (returnTo?: string) => options.slack!.beginSignIn(returnTo) } : {}) });
+      }, ...(options.slack ? { slackConnect: () => options.slack!.connect(), slackDisconnect: () => options.slack!.disconnect() } : {}) });
       // Interactive clients need a persistent connection for the form response.
       // Existing clients retain the stateless endpoint and its JSON responses.
       const initialization = isInitializeRequest(body) ? InitializeRequestSchema.safeParse(body) : undefined;
@@ -105,16 +105,6 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
       if (!value) return res.writeHead(403, { 'content-type': 'text/plain' }).end('This sign-in link expired or was used. Run a2a-notes open to get a new link.');
       return res.writeHead(303, { location: '/', 'set-cookie': `a2an_page=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`, 'cache-control': 'no-store' }).end();
     }
-    if (url.pathname === '/slack/callback') {
-      if (!options.slack) return send(res, 404, { error: { code: 'not_found', reason: 'Slack is not configured.' } });
-      let returnTo: string | undefined;
-      try { returnTo = await options.slack.finishSignIn(url.searchParams.get('state') || '', url.searchParams.get('code') || ''); }
-      catch (error) { return res.writeHead(400, { 'content-type': 'text/plain' }).end(`Slack sign-in failed: ${(error as Error).message}`); }
-      void service.scanNow().catch(() => {});
-      // back to the client page that started the sign-in (beginSignIn checked that it is on this computer), or to the
-      // review page; Slack returns to the redirect host (localhost), and the page cookie belongs to the sign-in host
-      return res.writeHead(303, { location: returnTo || `${base}/` }).end();
-    }
     const page = clients.page(cookie(req, 'a2an_page'));
     if (url.pathname === '/') {
       return res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self' http://localhost:* http://127.0.0.1:*", 'referrer-policy': 'no-referrer' })
@@ -149,7 +139,7 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
     if (req.method === 'POST' && url.pathname === '/api/sync') { await service.scanNow().catch(() => {}); return reply(service.connectionStatus()); }
     if (req.method === 'POST' && url.pathname === '/api/slack/connect') {
       if (!options.slack) throw new ServiceError('not_configured', 'Slack is not configured.', 'Add slack settings to config.json.');
-      return reply({ url: options.slack.beginSignIn() });
+      await options.slack.connect(); return reply({identity: service.identity()});
     }
     if (req.method === 'POST' && url.pathname === '/api/slack/disconnect') { options.slack?.disconnect(); return reply({ ok: true }); }
     throw new ServiceError('not_found', 'Not found.');

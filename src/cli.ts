@@ -15,18 +15,17 @@ const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? un
 const has = (name: string) => args.includes(name);
 const dir = resolve(flag('--dir') || defaultDir());
 const usage = `a2a-notes <command>
-  init --client-id ID --team-id T [--port 4460] [--api-base URL] [--authorize-url URL]   write config.json
+  init --team-id T [--desktop-url http://127.0.0.1:19322] [--port 4460]   write config.json
   serve                                   run the service (MCP endpoint, review page, Slack scan)
   token add <name> --role person|reviewer|agent [--human-approval]    print a new client token once
   token list | token remove <name>
   open                                    print a one-time link to the review page
   status                                  print the connection and scan status
-  desktop enable --url http://127.0.0.1:P [--send]  save the optional endpoint and native send preference
+  desktop enable --url http://127.0.0.1:P  save the optional Slack Desktop endpoint
   desktop disable                         remove the endpoint from config
   desktop probe --url URL [--seconds 30]   check the installed app without delivering notes
   stop                                    stop the running service
   bridge [--url URL]                      stdio MCP bridge; reads the token from A2A_NOTES_TOKEN
-  import-slack <credentials.json> [--no-refresh]   use existing Slack user credentials
   service-file                            print a macOS LaunchAgent file that starts the service at sign-in
   fake-slack --port P --users U1:Name,U2:Name     run a fake Slack workspace for tests
 All commands take --dir <data folder> (default ~/.a2a-notes or A2A_NOTES_DIR).`;
@@ -42,13 +41,12 @@ const [cmd, sub] = args;
 switch (cmd) {
   case 'init': {
     const port = Number(flag('--port') || 4460);
-    const config = { port, slack: { clientId: flag('--client-id') || '', teamId: flag('--team-id') || '', redirectUri: `http://localhost:${port}/slack/callback`,
-      ...(flag('--api-base') ? { apiBase: flag('--api-base') } : {}), ...(flag('--authorize-url') ? { authorizeUrl: flag('--authorize-url') } : {}), ...(has('--allow-self') ? { allowSelf: true } : {}) },
-      scanIntervalSeconds: Number(flag('--scan-seconds') || 60) };
-    if (!config.slack.clientId || !config.slack.teamId) { console.error('init needs --client-id and --team-id'); process.exit(1); }
+    const config = {port, slack: {teamId: flag('--team-id') || '', desktopUrl: desktopURL(flag('--desktop-url') || 'http://127.0.0.1:19322').origin,
+      ...(has('--allow-self') ? {allowSelf: true} : {})}, scanIntervalSeconds: Number(flag('--scan-seconds') || 60)};
+    if (!/^T[A-Z0-9]+$/.test(config.slack.teamId)) throw new Error('init needs --team-id.');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     savePrivate(join(dir, 'config.json'), config);
-    console.log(`Wrote ${join(dir, 'config.json')}. Add ${config.slack.redirectUri} as a redirect URL in the Slack app.`);
+    console.log(`Wrote ${join(dir, 'config.json')}. Open Slack Desktop with its loopback debugging port.`);
     break;
   }
   case 'serve': {
@@ -80,21 +78,21 @@ switch (cmd) {
       config.desktop = { url, ...(has('--send') ? {send:true} : {}) }; savePrivate(join(dir, 'config.json'), config);
       console.log('Saved the Slack Desktop endpoint. Restart A2A Notes to connect.');
     } else if (sub === 'disable') {
-      delete config.desktop; savePrivate(join(dir, 'config.json'), config);
-      console.log('Removed the Slack Desktop endpoint. Restart A2A Notes to use history polling.');
+      throw new Error('Slack Desktop is the only Slack transport. Disconnect it on the review page.');
     } else if (sub === 'probe') {
       const url = desktopURL(flag('--url') || config.desktop?.url || '').origin;
       const seconds = Number(flag('--seconds') || 30);
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300) throw new Error('Use a probe time from 1 to 300 seconds.');
-      const slack = new SlackTransport(join(dir, 'slack-credentials.json'), config.slack);
+      const slack = new SlackTransport(join(dir, 'slack-app-account.json'), {...config.slack, desktopUrl: url});
+      await slack.connect();
       const temporary = mkdtempSync(join(tmpdir(), 'a2a-desktop-probe-'));
       let events = 0;
-      const hook = new SlackDesktopHook({ config: { url, send:has('--send') || config.desktop?.send === true }, dir: temporary, identity: () => slack.identity(),
+      const hook = new SlackDesktopHook({ config: { url, ...(has('--send') ? {send:true} : {}) }, dir: temporary, identity: () => slack.identity(),
         verifyChannel: channel => slack.verifyDesktopChannel(channel), receive: async () => { events++; } });
       try {
         hook.start();
         await new Promise(resolve => setTimeout(resolve, seconds * 1000));
-        console.log(JSON.stringify({ ...hook.status(), events, delivered: false }, null, 2));
+        console.log(JSON.stringify({ ...hook.status(), app: slack.viewStatus(), events, delivered: false }, null, 2));
       } finally { await hook.close(); rmSync(temporary, { recursive: true, force: true }); }
     } else throw new Error('Use desktop enable, disable, or probe.');
     break;
@@ -106,19 +104,7 @@ switch (cmd) {
     await runBridge(url, token);
     break;
   }
-  case 'import-slack': {
-    const source = args[1];
-    if (!source || !existsSync(source)) { console.error('import-slack needs a credentials file'); process.exit(1); }
-    const c = JSON.parse(readFileSync(source, 'utf8'));
-    if (!c.user || !c.team || !c.access || !Array.isArray(c.scopes)) { console.error('The file does not have Slack user credentials.'); process.exit(1); }
-    savePrivate(join(dir, 'slack-credentials.json'), { user: c.user, team: c.team, name: c.name || c.user, scopes: c.scopes, access: c.access,
-      ...(has('--no-refresh') ? {} : { refresh: c.refresh, expires: c.expires }) });
-    if (has('--no-refresh')) {
-      const config = readConfig(dir); config.slack.noRefresh = true; savePrivate(join(dir, 'config.json'), config);
-    }
-    console.log(`Imported the Slack credentials for ${c.user}. The token itself is not printed.`);
-    break;
-  }
+  case 'import-slack': throw new Error('Slack credentials are no longer used. Connect the signed-in desktop app.');
   case 'service-file': {
     const bin = process.argv[1];
     console.log(`<?xml version="1.0" encoding="UTF-8"?>

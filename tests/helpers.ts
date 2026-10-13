@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { startFakeSlack, type FakeSlack } from '../src/fake-slack.ts';
 import { NotesService, type ServiceOptions, type Session } from '../src/service.ts';
-import { SlackTransport } from '../src/slack.ts';
+import { FakeSlackTransport as SlackTransport } from '../src/fake-slack-transport.ts';
 import { savePrivate, Store } from '../src/store.ts';
 import { sha256, writeAgentFile, type AgentRequest } from '../src/protocol.ts';
 
@@ -46,3 +46,9 @@ export function stageAgentFile(service: NotesService, session: Session, request:
 }
 
 export const fixture = (name: string) => readFileSync(join(import.meta.dirname, 'fixtures', name));
+
+export async function startTestService(dir: string) {
+  const {startService, readConfig} = await import('../src/daemon.ts');
+  const transport = new SlackTransport(join(dir, 'slack-credentials.json'), readConfig(dir).slack as any, fetch, {disableQuotas:true});
+  return startService(dir, {}, undefined, undefined, {transport});
+}

@@ -7,7 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { startService } from '../src/daemon.ts';
+import { startTestService as startService } from './helpers.ts';
 import { savePrivate } from '../src/store.ts';
 import { sha256 } from '../src/protocol.ts';
 import { ALEX, MARIO, agent, person, fakeWorkspace, personService, rid, slackConfig } from './helpers.ts';
