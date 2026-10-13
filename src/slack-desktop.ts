@@ -162,6 +162,9 @@ export class SlackDesktopHook {
     finally { this.connecting = false; this.state(); }
   }
   private async attach(target: Target, team: string, owner: string) {
+    // A listener can change while an older debugger connection remains open.
+    await (this.options.verifyEndpoint || verifySlackDesktopEndpoint)(this.endpoint);
+    if (this.stopped) return;
     const socket = new WebSocket(target.webSocketDebuggerUrl, { maxPayload: 2 * 1024 * 1024, handshakeTimeout: 3000 });
     this.sockets.set(target.id, socket);
     const trusted = new Set<string>(); this.nativeSockets.set(target.id, trusted);

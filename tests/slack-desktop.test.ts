@@ -24,8 +24,9 @@ async function wait(check: () => boolean, ms = 5000) {
 }
 async function cdp(t: any, team = 'TEXAMPLE', owner = MARIO) {
   const clients = new Set<WebSocket>(); const calls: any[] = [];
+  let targetId = 'slack-page';
   let port = 0;
-  const server = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify([{ id: 'slack-page', type: 'page', url: `https://app.slack.com/client/${team}/DSELF`, webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/slack-page` }])); });
+  const server = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify([{ id: targetId, type: 'page', url: `https://app.slack.com/client/${team}/DSELF`, webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/${targetId}` }])); });
   const ws = new WebSocketServer({ server });
   ws.on('connection', client => {
     clients.add(client); client.on('close', () => clients.delete(client));
@@ -37,7 +38,7 @@ async function cdp(t: any, team = 'TEXAMPLE', owner = MARIO) {
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r)); port = (server.address() as any).port;
   t.after(async () => { for (const c of clients) c.terminate(); await new Promise<void>(r => ws.close(() => server.close(() => r()))); });
-  return { url: `http://127.0.0.1:${port}`, calls, clients,
+  return { url: `http://127.0.0.1:${port}`, calls, clients, changeTarget: () => {targetId = 'new-page';},
     event: (event: unknown, requestId = 'native', method = 'Network.webSocketFrameReceived') => {
       for (const c of clients) c.send(JSON.stringify({ method, params: { requestId, response: { opcode: 1, payloadData: JSON.stringify(event) } } }));
     },
@@ -144,6 +145,17 @@ test('a disconnected debugger reconnects and restores verified listening', async
   await wait(() => !hook.status().connected); await wait(() => hook.status().listening);
   remote.event(event); await wait(() => received === 1);
   assert.ok(states.includes(false)); assert.equal(states.at(-1), true);
+});
+
+test('a replacement target rechecks port ownership while the previous socket remains open', async t => {
+  const remote = await cdp(t); let verified = 0;
+  const hook = new SlackDesktopHook({ config: {url: remote.url}, dir: mkdtempSync(join(tmpdir(), 'desktop-owner-change-')),
+    identity: () => identity, verifyEndpoint: async () => { if (++verified > 2) throw new Error('The listener changed.'); },
+    verifyChannel: async () => true, receive: async () => assert.fail() });
+  t.after(() => hook.close()); hook.start(); await wait(() => hook.status().listening);
+  const calls = remote.calls.length; remote.changeTarget();
+  await wait(() => verified > 2); await new Promise(r => setTimeout(r, 100));
+  assert.equal(remote.calls.length, calls); assert.equal(hook.status().listening, false);
 });
 
 test('closing during target discovery does not open a new socket', async t => {

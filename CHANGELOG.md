@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.1
+
+- Recheck the Slack port owner before each new debugger connection.
+- Refuse a replacement target if another process takes the listener while an older socket remains open.
+
 ## 0.8.0
 
 - Connect to the installed macOS Slack app through an optional loopback debugging port.
