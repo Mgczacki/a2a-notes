@@ -139,6 +139,7 @@ export function commandReviewer(argv: string[], timeoutMs = 120_000): Reviewer {
         resolve({ verdict: value.verdict, reason: value.reason.slice(0, 500), reviewer: 'command' });
       } catch { resolve({ verdict: 'uncertain', reason: 'The review command returned output that is not a verdict.', reviewer: 'command' }); }
     });
+    child.stdin?.on('error', () => resolve({ verdict: 'uncertain', reason: 'The review command did not accept its input.', reviewer: 'command' }));
     child.stdin?.end(JSON.stringify(input));
   });
 }
@@ -177,6 +178,7 @@ export function commandBodyChecker(argv: string[], timeoutMs = 120_000): BodyChe
         resolve({ ok: true, flags });
       } catch { resolve({ ok: false, flags: [] }); }
     });
+    child.stdin?.on('error', () => resolve({ ok: false, flags: [] }));
     child.stdin?.end(JSON.stringify({ ...input, sentences: spans.map(s => s.text) }));
   });
 }

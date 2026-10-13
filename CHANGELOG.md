@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0
+## 0.10.0
 
 - Add an optional preference for sending approved notes through the installed Slack app.
 - Verify the native API code before it sends. Unknown code uses the existing API path before any native attempt.
@@ -10,6 +10,18 @@
 - Preserve native Retry-After across restart. Do not switch adapters after uncertain delivery.
 - Read the displayed Slack wrapper in native events. Ignore outgoing echoes as incoming instructions.
 - Show native send availability in connection status.
+
+
+- Add generic receipt acknowledgement through `a2anotes_ack`.
+- Store native intake and pending acknowledgement in one write.
+- Post the configured Slack reaction. The default is ✅.
+- Retry uncertain reaction responses without creating reply notes.
+- Keep acknowledgement separate from acceptance and action approval.
+- Show acknowledgement errors and retries on the review page.
+- Report agent delivery failures through fixed Slack notices without exposing task details.
+- Reconcile uncertain notices before another post.
+- Handle check commands that close their input without stopping the service.
+
 
 ## 0.8.1
 

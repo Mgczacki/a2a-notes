@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkOutgoingBody, compareAsk, commandReviewer, review, ruleReviewer } from '../src/checks.ts';
+import { checkOutgoingBody, compareAsk, commandBodyChecker, commandReviewer, review, ruleReviewer } from '../src/checks.ts';
 import { incomingApprover, outgoingApprover, checkPolicy, DEFAULT_POLICY } from '../src/policy.ts';
 import { parseAgentFile } from '../src/protocol.ts';
 import { fixture } from './helpers.ts';
@@ -66,4 +66,13 @@ test('approval levels follow the level rules', () => {
   assert.throws(() => checkPolicy({ incoming: 4 }, DEFAULT_POLICY), /level must be/);
   assert.equal(checkPolicy({ incoming: 1 }, DEFAULT_POLICY).version, 2);
   assert.equal(checkPolicy({ incoming: 2 }, DEFAULT_POLICY).version, 1, 'no change keeps the version');
+});
+
+
+test('a check command that closes stdin cannot crash the service', async () => {
+  const body = 'Plan text. '.repeat(200_000);
+  const result = await commandReviewer(['/bin/sh', '-c', 'exit 0'])({ direction: 'incoming', subject: 'Plan', body, files: [] });
+  assert.equal(result.verdict, 'uncertain');
+  const checked = await commandBodyChecker(['/bin/sh', '-c', 'exit 0'])({ subject: 'Plan', body, audience: 'person' });
+  assert.equal(checked.ok, false);
 });

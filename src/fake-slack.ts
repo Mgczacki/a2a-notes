@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 
 export interface FakeUser { id: string; name: string; real_name?: string; email?: string; is_bot?: boolean; deleted?: boolean }
-interface Msg { ts: string; user: string; text: string; bot_id?: string; app_id?: string; blocks?: unknown; thread_ts?: string; subtype?: string; files?: { id: string }[]; client_msg_id?: string }
+interface Msg { reactions?: { name: string; users: string[]; count: number }[]; ts: string; user: string; text: string; bot_id?: string; app_id?: string; blocks?: unknown; thread_ts?: string; subtype?: string; files?: { id: string }[]; client_msg_id?: string }
 interface Channel { id: string; members: [string, string]; messages: Msg[]; replies: Msg[]; updated: number }
 interface File { id: string; user: string; name: string; size: number; bytes?: Buffer; channels: string[] }
 type Failure = { mode: 'error' | 'lost' | 'ratelimit' | 'timeout'; count: number; error?: string; retryAfter?: number; after?: number };
@@ -23,7 +23,7 @@ export interface FakeSlack {
   close(): Promise<void>;
 }
 
-const ALL_SCOPES = ['chat:write', 'im:write', 'im:read', 'im:history', 'users:read', 'users:read.email', 'files:read', 'files:write'];
+const ALL_SCOPES = ['chat:write', 'im:write', 'im:read', 'im:history', 'users:read', 'users:read.email', 'files:read', 'files:write', 'reactions:write'];
 
 async function body(req: IncomingMessage): Promise<{ raw: Buffer; params: Record<string, string> }> {
   const chunks: Buffer[] = [];
@@ -117,6 +117,16 @@ export async function startFakeSlack(options: { port?: number; team?: string; us
       const matching = c.replies.filter(m => m.thread_ts === p.ts && Number(m.ts) > Number(p.oldest || 0) && Number(m.ts) <= Number(p.latest || Infinity)).sort((a, b) => Number(a.ts) - Number(b.ts));
       const start = Number(p.cursor || 0), size = Number(p.limit || 100), more = start + size < matching.length;
       return { messages: matching.slice(start, start + size), has_more: more, response_metadata: { next_cursor: more ? String(start + size) : '' } };
+    },
+    'reactions.add': (p, user) => {
+      const c = channels.get(p.channel); if (!c || !c.members.includes(user!)) throw new Error('channel_not_found');
+      const m = [...c.messages, ...c.replies].find(m => m.ts === p.timestamp); if (!m) throw new Error('message_not_found');
+      m.reactions ||= [];
+      let r = m.reactions.find(r => r.name === p.name);
+      if (r?.users.includes(user!)) throw new Error('already_reacted');
+      if (!r) { r = { name: p.name, users: [], count: 0 }; m.reactions.push(r); }
+      r.users.push(user!); r.count = r.users.length;
+      return {};
     },
     'chat.postMessage': (p, user) => {
       const c = channels.get(p.channel); if (!c || !c.members.includes(user!)) throw new Error('channel_not_found');

@@ -10,7 +10,8 @@ import {
 } from './protocol.ts';
 import { checkPolicy, incomingApprover, outgoingApprover, type Approver, type Policy } from './policy.ts';
 import { checkOutgoingBody, fileTextForChecks, review, type BodyCheck, type BodyChecker, type ReviewResult, type Reviewer } from './checks.ts';
-import { noteHash, ServiceError, Store, type Data, type Metadata, type Note, type Role, type StoredFile } from './store.ts';
+import { noteHash, ServiceError, Store, type Data, type AgentDeliveryStatus, type Metadata, type Note, type Role, type StoredFile } from './store.ts';
+import { Acknowledgements } from './acknowledgement.ts';
 import { TransportError, type Received, type Transport } from './transport.ts';
 
 export interface Session { name: string; role: Role; humanApproval?: boolean }
@@ -66,15 +67,18 @@ export class NotesService {
   private active = new Set<Promise<void>>();
   private humanApprovals = new Set<string>();
   private stopping = false;
+  private acknowledgements: Acknowledgements;
   constructor(private options: ServiceOptions) {
     this.store = options.store;
     this.transport = options.transport;
     this.reviewer = options.reviewer;
+    this.acknowledgements = new Acknowledgements(this.store, this.transport, () => this.now());
   }
 
   // After a restart: a message that was sending when the process stopped may or may not be in Slack.
   start() {
     this.stopping = false;
+    this.acknowledgements.start();
     this.store.change(data => {
       for (const n of data.notes) if (n.direction === 'out' && !n.delivery && ['queued', 'sending', 'delivery_uncertain'].includes(n.state)) {
         n.delivery = { hash: n.approval?.hash || n.hash, actor: n.approval?.actor || 'service',
@@ -113,6 +117,7 @@ export class NotesService {
     this.timer = undefined; this.retryTimer = undefined;
     await Promise.allSettled([...this.active]);
     await this.scanning?.catch(() => {});
+    await this.acknowledgements.stop();
   }
 
   private desktopListening = false;
@@ -155,6 +160,7 @@ export class NotesService {
       if (n.state === 'held' && canApprove) actions.push('approve', 'reject');
       if (n.state === 'approved' && this.approvalValid(n, data)) actions.push('reply', ...(n.audience !== 'person' ? ['release_to_agent'] : []));
       actions.push('mark_seen');
+      if (this.canAcknowledge(n, data, session)) actions.push('ack');
     }
     return actions;
   }
@@ -188,6 +194,7 @@ export class NotesService {
       thread_id: n.threadId, created: n.created, updated: n.updated, seen: !!n.seen, ...(n.failure ? { failure_code: n.failure.code } : {}),
       next_retry_at: n.delivery?.nextAttemptAt ?? n.nextRetryAt ?? null, sent_at: n.sentAt ?? null,
       source: n.source ?? 'a2anotes', direct_target: n.directTarget ?? null, owner_message: this.isOwnerMessage(n, data), delivery: n.delivery ?? null, error: n.error ?? null,
+      acknowledgement: n.acknowledgement ?? null, agent_delivery: n.agentDelivery ?? null, delivery_notice: n.deliveryNotice ?? null,
       metadata: n.metadata ?? null, reply_to_local: this.replyLink(n, data),
       hash: n.hash, allowed_actions: this.allowed(n, data, session),
     };
@@ -549,6 +556,8 @@ export class NotesService {
   }
 
   async processQueue() {
+    if (this.stopping) return;
+    await this.acknowledgements.process();
     const due = this.store.read().notes.filter(n => n.direction === 'out' &&
       ['queued', 'delivery_uncertain'].includes(n.state) && n.delivery?.nextAttemptAt &&
       Date.parse(n.delivery.nextAttemptAt) <= this.now());
@@ -663,6 +672,66 @@ export class NotesService {
       this.finishFailure(id, t?.rateLimited ? 'retry_exhausted' : uncertain ? 'delivery_uncertain' : error instanceof ServiceError ? error.code : 'transport_error', e.message);
       if (!t?.rateLimited) throw new ServiceError('send_failed', e.message, 'Read the final failure. This note will not retry.');
     } finally { this.sending.delete(id); }
+  }
+
+  private canAcknowledge(n: Note, data: Data, session: Session) {
+    return n.direction === 'in' && !n.failure && ['held', 'approved'].includes(n.state) &&
+      n.to === this.transport.identity()?.address && n.transport?.name === this.transport.name &&
+      !!this.transport.acknowledge && (session.role === 'person' ||
+        n.state === 'approved' && this.approvalValid(n, data) && n.audience !== 'person');
+  }
+
+  async acknowledge(session: Session, input: { id?: unknown; expected_hash?: unknown }) {
+    const data = this.store.read(), n = data.notes.find(x => x.id === input.id);
+    if (!n || !this.visible(n, data, session)) throw new ServiceError('not_found', 'No message has this ID.');
+    if (!this.canAcknowledge(n, data, session)) throw new ServiceError('forbidden', 'This session cannot acknowledge this message.');
+    if (input.expected_hash !== n.hash) throw new ServiceError('hash_changed', 'Read the current message before acknowledging it.');
+    if (n.acknowledgement?.status === 'failed' && n.acknowledgement.hash === n.hash) {
+      this.store.update(n.id, (x, d) => {
+        const ack = x.acknowledgement!;
+        ack.status = 'pending'; ack.attempts = 0; ack.nextAttemptAt = this.at();
+        delete ack.error; delete ack.failureCode;
+        this.store.audit(d, session.name, 'ack_retry_requested', x.id);
+      });
+    }
+    this.acknowledgements.queue(n, session.name);
+    await this.acknowledgements.attempt(n.id);
+    return this.get(session, n.id);
+  }
+
+  async reportAgentDelivery(session: Session, input: { id?: unknown; expected_hash?: unknown; status?: unknown }) {
+    if (session.role === 'agent') throw new ServiceError('forbidden', 'Only the person or a connector reviewer can report agent delivery.');
+    const data = this.store.read(), n = data.notes.find(x => x.id === input.id);
+    if (!n || n.direction !== 'in') throw new ServiceError('not_found', 'No incoming message has this ID.');
+    if (n.to !== this.transport.identity()?.address || !this.approvalValid(n, data) || n.state !== 'approved')
+      throw new ServiceError('not_approved', 'Accept this message before reporting agent delivery.');
+    if (input.expected_hash !== n.hash) throw new ServiceError('hash_changed', 'Read the current message before reporting delivery.');
+    if (!['unassigned', 'notification_pending', 'notified'].includes(String(input.status))) throw new ServiceError('invalid_input', 'Unknown delivery status.');
+    const status = input.status as AgentDeliveryStatus;
+    this.store.update(n.id, (x, d) => {
+      if (x.agentDelivery?.status === status) {
+        if (x.deliveryNotice?.status === 'failed') {
+          x.deliveryNotice.status = 'pending'; x.deliveryNotice.attempts = 0; x.deliveryNotice.nextAttemptAt = this.at();
+          delete x.deliveryNotice.error; delete x.deliveryNotice.failureCode;
+          this.store.audit(d, session.name, 'delivery_notice_retry_requested', x.id);
+        }
+        return;
+      }
+      const hadFailure = !!x.agentDelivery && x.agentDelivery.status !== 'notified';
+      x.agentDelivery = { status, updatedAt: this.at() };
+      if (status === 'notified' && !hadFailure) delete x.deliveryNotice;
+      else x.deliveryNotice = { by: x.to, requestedBy: session.name, hash: x.hash, requestedAt: this.at(),
+        status: 'pending', attempts: 0, nextAttemptAt: this.at(), deliveryStatus: status, operationId: randomUUID() };
+      this.store.audit(d, session.name, 'agent_delivery', x.id, status);
+    });
+    await this.acknowledgements.attempt(n.id, 'deliveryNotice');
+    return this.get(session, n.id);
+  }
+
+  private async acknowledgeIntake(n: Note) {
+    if (n.failure || !['held', 'approved'].includes(n.state) || !this.transport.acknowledge) return;
+    this.acknowledgements.queue(n, 'service');
+    await this.acknowledgements.attempt(n.id);
   }
 
   markSeen(session: Session, id: unknown) {
@@ -819,10 +888,12 @@ export class NotesService {
     note.review = await review({ direction: 'incoming', subject: note.subject, body, files: [] }, this.reviewer);
     if (note.review.verdict === 'quarantine') note.state = 'quarantined';
     this.acceptOwnerMessage(m, note);
+    if (['held', 'approved'].includes(note.state) && this.transport.acknowledge) this.acknowledgements.prepare(note, 'service');
     this.store.change(d => {
       if (d.notes.some(n => n.id === id)) return;
       d.notes.push(note); this.store.audit(d, 'service', 'human_reply_received', id, original.id);
     });
+    await this.acknowledgeIntake(note);
   }
 
   private isOwnerMessage(n: Note, data: Data): boolean {
@@ -859,10 +930,12 @@ export class NotesService {
     note.review = await review({ direction: 'incoming', subject: note.subject, body, files: [] }, this.reviewer);
     if (note.review.verdict === 'quarantine') note.state = 'quarantined';
     this.acceptOwnerMessage(m, note);
+    if (['held', 'approved'].includes(note.state) && this.transport.acknowledge) this.acknowledgements.prepare(note, 'service');
     this.store.change(d => {
       if (d.notes.some(n => n.id === base.id)) return;
       d.notes.push(note); this.store.audit(d, 'service', 'human_message_received', note.id, note.directTarget);
     });
+    await this.acknowledgeIntake(note);
   }
 
   private async wrap<T>(fn: () => Promise<T>): Promise<T> {

@@ -7,7 +7,7 @@ import { END_MARKER, FILE_VERSION, WIRE_VERSION } from './protocol.ts';
 import { ServiceError } from './store.ts';
 import type { NotesService, Session } from './service.ts';
 
-export const VERSION = '0.9.0';
+export const VERSION = '0.10.0';
 // The body format and writing rules for the draft tools (docs/WRITING-MESSAGES.md has the full text and examples).
 export const BODY_GUIDE = [
   'Write the body for a person who has none of your context: why they get the message, the facts they need, one ask, and a date if one applies.',
@@ -129,6 +129,15 @@ export function createMcpServer(service: NotesService, session: Session, extra: 
   server.registerTool('a2anotes_send', { description: 'Attempts an approved queued draft when its deadline permits delivery. Rate limits schedule retries of unchanged content. Uncertain writes require reconciliation. Read delivery.nextAttemptAt or next_retry_at for the next attempt.',
     inputSchema: { id: z.string().max(100), expected_hash: z.string().max(64), request_id: z.string() },
   }, args => run(() => service.send(session, args), v => `${v.id} is ${v.state}.`));
+
+  server.registerTool('a2anotes_ack', { description: 'Acknowledges receipt of an incoming message. It never approves content or actions. Slack adds the configured reaction.',
+    inputSchema: { id: z.string().max(100), expected_hash: z.string().regex(/^[0-9a-f]{64}$/) },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true } },
+    args => run(() => service.acknowledge(session, args), v => `Acknowledgement ${v.acknowledgement?.status}.`));
+
+  server.registerTool('a2anotes_report_delivery', { description: 'Records agent notification status for an accepted note. A failure posts a fixed transport notice. It never approves actions. Person or reviewer only.',
+    inputSchema: { id: z.string().max(100), expected_hash: z.string().regex(/^[0-9a-f]{64}$/), status: z.enum(['unassigned', 'notification_pending', 'notified']) } },
+    args => run(() => service.reportAgentDelivery(session, args), v => `Agent delivery: ${v.agent_delivery?.status}.`));
 
   server.registerTool('a2anotes_mark_seen', { description: 'Marks a message as seen. It does not approve or route text.', inputSchema: idShape },
     args => run(() => service.markSeen(session, args.id), () => 'Marked as seen.'));

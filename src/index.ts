@@ -2,7 +2,7 @@
 export * from './protocol.ts';
 export * from './policy.ts';
 export * from './checks.ts';
-export { Store, ServiceError, noteHash, type Note, type Role, type Data, type Delivery, type SendCheckpoint } from './store.ts';
+export { Store, ServiceError, noteHash, type Note, type Role, type Data, type Delivery, type Acknowledgement, type AgentDeliveryStatus, type DeliveryNotice, type SendCheckpoint } from './store.ts';
 export { NotesService, type Session, type ServiceOptions } from './service.ts';
 export { SlackTransport, slackAddress, parseSlackAddress, REQUIRED_SCOPES, OPTIONAL_SCOPES, type SlackConfig } from './slack.ts';
 export type { Transport, Received, Person, Identity } from './transport.ts';

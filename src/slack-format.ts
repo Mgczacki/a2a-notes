@@ -172,7 +172,7 @@ export function slackBlocks(d: Display, options: { projectLink?: string } = {}):
   ];
   if (attached.length) blocks.push({ type: 'context', elements: attached.slice(0, 10).map(plain) });
   blocks.push({ type: 'divider' });
-  blocks.push({ type: 'context', elements: [plain(d.messageId ? `Reply in this conversation or its thread. Start with this exact line:\nA2A Reply/1 ${d.messageId}\nPut your reply on the next line. A reply submits text for review. It does not approve actions.` : d.audience === 'person'
+  blocks.push({ type: 'context', elements: [plain(d.messageId ? `Reply in this conversation or its thread. Start with this exact line:\nA2A Reply/1 ${d.messageId}\nPut your reply on the next line. A reply submits text for review. It does not approve actions. The acknowledgement reaction means received. It does not approve or complete work.` : d.audience === 'person'
     ? `To reply, send an A2A Notes message to ${sender}.`
     : `Your agent can read this message after you approve it in A2A Notes. To reply, send an A2A Notes message to ${sender}.`),
     // mrkdwn is the only element type that shows a link; the label is fixed text, never message text

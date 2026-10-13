@@ -1,4 +1,4 @@
-import type { SendCheckpoint } from './store.ts';
+import type { SendCheckpoint, AgentDeliveryStatus } from './store.ts';
 // The contract between the protocol core (src/service.ts) and a delivery service. The core stores stable message
 // and attachment IDs. An adapter maps them to its own IDs, checks identities, and moves text and file bytes.
 export interface Person { address: string; name: string; realName: string; title: string; active: boolean; email?: string; image?: string }
@@ -50,6 +50,10 @@ export interface Transport {
   findPeople(query: string, limit: number, cursor?: string): Promise<{ people: Person[]; next?: string }>;
   checkRecipient(address: string): Promise<Person>;
   send(input: SendInput): Promise<SendResult>;
+  // The adapter interprets its saved reference. Receipt grants no approval.
+  acknowledge?(reference: Record<string, string>): Promise<void>;
+  // Send a fixed delivery notice. It grants no authority and contains no message body.
+  notifyDelivery?(reference: Record<string, string>, status: AgentDeliveryStatus): Promise<void>;
   // looks for a message that this account sent with this ID, after a send that may or may not have posted
   findSent(to: string, messageId: string, since?: string, progress?: { cursor?: string; save: (cursor?: string) => void }): Promise<{ channel: string; ts: string } | null>;
   // reads messages newer than each saved cursor, oldest first. handle stores and checks one message; the adapter

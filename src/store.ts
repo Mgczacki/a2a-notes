@@ -27,6 +27,13 @@ export interface SendCheckpoint {
   postTransport?: 'web-api' | 'desktop';
   uploads: Record<string, { fileId: string; url: string; phase: 'allocated' | 'uploaded' | 'completing' | 'complete' }>;
 }
+export interface Acknowledgement {
+  by: string; requestedBy: string; hash: string; requestedAt: string;
+  status: 'pending' | 'confirmed' | 'failed'; attempts: number; nextAttemptAt?: string;
+  confirmedAt?: string; error?: string; failureCode?: string;
+}
+export type AgentDeliveryStatus = 'unassigned' | 'notification_pending' | 'notified';
+export interface DeliveryNotice extends Acknowledgement { deliveryStatus: AgentDeliveryStatus; operationId: string; uncertain?: boolean }
 export interface Note {
   id: string; messageId: string; direction: 'in' | 'out'; state: OutState | InState;
   from: string; to: string; peerName?: string; subject: string; body: string; audience: Audience;
@@ -42,6 +49,9 @@ export interface Note {
   directTarget?: string;
   // Only the service writes this after it checks a native Slack message in the owner's self-conversation.
   ownerMessage?: { address: string; hash: string };
+  acknowledgement?: Acknowledgement;
+  agentDelivery?: { status: AgentDeliveryStatus; updatedAt: string };
+  deliveryNotice?: DeliveryNotice;
   delivery?: Delivery;
   checkpoint?: SendCheckpoint;
   transport?: { name: string; channel?: string; ts?: string; threadTs?: string; files?: Record<string, string> };

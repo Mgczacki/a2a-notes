@@ -274,3 +274,33 @@ Any MCP client can use this service: a command-line agent through `a2a-notes bri
 - The package has no registered Slack app of its own. `a2a-notes init` takes the client ID and team of the Slack app that you use.
 - The fixed body rules flag detail names from the agent file, code names, internal task numbers, local paths, secrets, sender notes, and an ask that differs from the `instruction` input.
 - The first release supports one Slack workspace. It does not send between workspaces.
+
+## Acknowledge receipt
+
+`a2anotes_ack` takes the incoming note's `id` and `expected_hash`.
+It records receipt separately from acceptance and action approval.
+A person can acknowledge a held note. Agents can acknowledge only approved content released to them.
+`a2anotes_mark_seen` remains a local viewing flag and posts nothing.
+
+Verified native human replies and direct messages queue acknowledgement in the same write that stores the note.
+Failed or quarantined input receives no automatic acknowledgement.
+Slack adds ✅ to that exact post with `reactions.add`.
+The recipient account needs `reactions:write`. Reconnect Slack after the app grants this scope.
+Set `slack.acknowledgementEmoji` to a Slack emoji name to change the reaction. The default is `white_check_mark`.
+
+The note exposes `acknowledgement` with its status and error.
+An uncertain response retries the same reaction. An existing reaction counts as confirmation.
+Rate limits keep the request pending. Eight failed attempts stop automatic retry.
+Permanent errors stop retry immediately. Call `a2anotes_ack` again after correcting a permanent error.
+
+The reaction means received by the endpoint. It does not prove agent notification or completed work.
+It never approves a draft or action. Manual Slack reactions are not imported as instructions or approvals.
+Transports can implement the optional `acknowledge` operation without Slack parsing in the core.
+
+`a2anotes_report_delivery` lets a person or connector reviewer report agent notification status for an accepted message.
+Taskboard reports when no agent is selected or notification is pending.
+The Slack adapter posts fixed text without the original body or internal task details.
+It posts a further notice if a reported failure resolves.
+These notices use durable retries and never enter agent intake.
+After an uncertain send or restart, the adapter looks for the saved operation ID before posting again.
+Agent delivery remains separate from endpoint acknowledgement and action approval.

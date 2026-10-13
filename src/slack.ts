@@ -5,12 +5,12 @@ import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DesktopDeliveries } from './slack-desktop-delivery.ts';
 import { DesktopUnavailableError, type SlackDesktopHook } from './slack-desktop.ts';
-import { savePrivate } from './store.ts';
+import { type AgentDeliveryStatus, savePrivate } from './store.ts';
 import { TransportError, type Identity, type Person, type Received, type SendInput, type Transport } from './transport.ts';
 import { checkProjectLink, slackBlocks, slackText, readSlackText, MAX_SLACK_TEXT } from './slack-format.ts';
 
 export const REQUIRED_SCOPES = ['chat:write', 'im:write', 'im:read', 'im:history', 'users:read'];
-export const OPTIONAL_SCOPES = ['users:read.email', 'files:read', 'files:write'];
+export const OPTIONAL_SCOPES = ['users:read.email', 'files:read', 'files:write', 'reactions:write'];
 // A scan reads at most 40 conversations. Slack applies each method quota to the app and workspace.
 const MAX_CONVERSATIONS_PER_SCAN = 40;
 const READS = new Set(['auth.test', 'conversations.history', 'conversations.replies', 'conversations.list', 'files.info', 'users.info', 'users.list', 'users.lookupByEmail']);
@@ -28,6 +28,7 @@ export interface SlackConfig {
   firstScanDays?: number;
   // the "Get A2A Notes" link in the message footer (default: the A2A Notes repository); an empty value hides it
   projectLink?: string;
+  acknowledgementEmoji?: string;
 }
 interface Credentials { user: string; team: string; name: string; scopes: string[]; access: string; refresh?: string; expires?: number }
 
@@ -68,6 +69,35 @@ export class SlackTransport implements Transport {
     return { transport: 'slack', address: slackAddress(c.team, c.user), name: c.name, scopes: c.scopes,
       missingScopes: REQUIRED_SCOPES.filter(s => !c.scopes.includes(s)), optionalMissing: OPTIONAL_SCOPES.filter(s => !c.scopes.includes(s)) };
   }
+  async acknowledge(reference: Record<string, string>) {
+    if (!this.identity()?.scopes.includes('reactions:write')) throw new TransportError('Reconnect Slack with reactions:write to acknowledge messages.', true);
+    if (!reference.channel || !reference.ts) throw new TransportError('The message has no saved Slack reference.', true);
+    const name = this.config.acknowledgementEmoji ?? 'white_check_mark';
+    if (!/^[a-z0-9_+-]{1,64}$/.test(name)) throw new TransportError('The acknowledgement emoji name is invalid.', true);
+    try { await this.call('reactions.add', { channel: reference.channel, timestamp: reference.ts, name }); }
+    catch (error) { if (!(error instanceof TransportError && error.message === 'Slack: already_reacted')) throw error; }
+  }
+
+  async notifyDelivery(reference: Record<string, string>, status: AgentDeliveryStatus) {
+    if (!reference.channel || !reference.operation_id) throw new TransportError('The delivery notice has no saved reference.', true);
+    if (reference.reconcile === 'true') {
+      let cursor = '';
+      for (let page = 0; page < 10; page++) {
+        const result = await this.call('conversations.history', { channel: reference.channel, limit: '100', ...(cursor ? { cursor } : {}) });
+        if ((result.messages || []).some((m: any) => m.user === this.self().user && m.client_msg_id === reference.operation_id)) return;
+        cursor = result.response_metadata?.next_cursor || '';
+        if (!cursor) break;
+      }
+      throw new TransportError('Slack has not confirmed the earlier delivery notice. No duplicate notice was posted.', false);
+    }
+    const text = status === 'unassigned' ? 'Message received. No agent was selected. The recipient must choose an agent in Taskboard.'
+      : status === 'notified' ? 'The agent received your message. This does not mean completed work.'
+      : 'Message received. Agent notification is pending. The recipient can check delivery in Taskboard.';
+    const result = await this.call('chat.postMessage', { channel: reference.channel, text, mrkdwn: 'false', parse: 'none',
+      unfurl_links: 'false', unfurl_media: 'false', client_msg_id: reference.operation_id });
+    if (!result.ts) throw new TransportError('Slack did not confirm the delivery notice.', false);
+  }
+
   disconnect() { this.generation++; this.pending = undefined; if (existsSync(this.file)) unlinkSync(this.file); }
 
   // Slack serves files from its own hosts. A test server serves them from its API host.

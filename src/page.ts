@@ -58,6 +58,10 @@ const stateClass = s => ({ sent: 'ok', approved: 'ok', held: 'wait', draft: 'wai
 function card(m, trusted) {
   const peer = m.direction === 'in' ? m.from : m.to;
   const actions = el('div', { class: 'row' });
+  if (m.agent_delivery) actions.append(el('span', {}, 'Agent delivery: ' + m.agent_delivery.status + (m.delivery_notice?.error ? '. ' + m.delivery_notice.error : '')));
+  if (m.delivery_notice?.status === 'failed' && m.allowed_actions.includes('reply')) actions.append(el('button', { onclick: act(() => api('/api/messages/' + m.id + '/delivery', { hash: m.hash, status: m.agent_delivery.status })) }, 'Retry delivery notice'));
+  if (m.acknowledgement) actions.append(el('span', {}, 'Acknowledgement: ' + m.acknowledgement.status + (m.acknowledgement.error ? '. ' + m.acknowledgement.error : '')));
+  if (m.allowed_actions.includes('ack') && (!m.acknowledgement || m.acknowledgement.status === 'failed')) actions.append(el('button', { onclick: act(() => api('/api/messages/' + m.id + '/ack', { hash: m.hash })) }, 'Acknowledge receipt'));
   if (m.allowed_actions.includes('approve')) actions.append(el('button', { class: 'primary', onclick: act(() => api('/api/messages/' + m.id + '/decide', { hash: m.hash, decision: 'approve' })) }, 'Approve this version'));
   if (m.allowed_actions.includes('reject')) actions.append(el('button', { onclick: act(() => api('/api/messages/' + m.id + '/decide', { hash: m.hash, decision: 'reject' })) }, 'Reject'));
   if (m.allowed_actions.includes('send')) actions.append(el('button', { class: 'primary', onclick: act(() => api('/api/messages/' + m.id + '/send', { hash: m.hash })) }, m.state === 'delivery_uncertain' ? 'Check and send' : 'Send'));
