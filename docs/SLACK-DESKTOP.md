@@ -58,13 +58,60 @@ The existing store therefore identifies the same note when both paths read it.
 The connector removes its saved event only after `NotesService.receive` returns.
 If the service stops between those writes, it reads the saved event again without creating another note.
 
+## Send approved notes through the app
+
+Use `a2a-notes desktop enable --url http://127.0.0.1:19322 --send` to prefer native posting.
+Restart A2A Notes after you change this setting.
+The setting stays off unless the user selects it.
+`desktop.sendEnabled` shows the selected preference. `desktop.canSend` shows whether the current native function is available.
+
+The existing service approves the note before it calls either adapter.
+The sender checks and file uploads continue through the existing Slack adapter.
+The native preference replaces the final `chat.postMessage` call.
+It sends the same wire text and displayed blocks through Slack's current API function.
+The function uses the account already signed in to Slack.
+The connector checks that this account matches the A2A Notes account.
+It does not return Slack credentials or change the user's composer.
+
+The connector checks hashes of the inspected native code before each call.
+An unknown app build cannot use this native function.
+If native sending is unavailable before posting, the adapter uses the existing Web API path.
+Native credential failures stop the attempt. They do not cause a send through another adapter.
+
+The connector sets one SDK attempt for its own request.
+It restores the app's queue method immediately after enqueueing that request.
+Ordinary Slack requests retain their current behavior.
+A native timeout cancels the request after 15 seconds.
+A2A Notes applies Retry-After and its current backoff to later attempts.
+The connector saves the native workspace wait in `desktop-limits.json`.
+
+`desktop-deliveries.json` stores each native attempt's message ID and content hash.
+The connector writes that record before it calls Slack.
+A verified echo must match the sender and channel before it supplies a receipt.
+It must also match the message ID and wire content.
+The connector saves the receipt before the service records successful delivery.
+
+The note's checkpoint records the selected adapter in `postTransport`.
+An uncertain result keeps `postStarted` true.
+The service checks native receipts before it queries Slack history.
+It never switches adapters and posts again after an uncertain result.
+Existing upload checkpoints keep file shares from repeating.
+Changed native payloads stop without another post.
+
+Native posting can still receive rate limits.
+The desktop client's exact quotas are unknown.
+This preference does not remove limits on sender lookup or file operations.
+Disable native preference by saving the endpoint without `--send` and restarting A2A Notes.
+Disabling it leaves existing uncertain attempts available for reconciliation.
+
 ## Recover and disconnect
 
 While the verified native connection remains open, history recovery runs at most once per five minutes.
 The configured scan interval still controls how often the timer checks that deadline.
 Lost connections restore ordinary history polling.
 Manual scans remain available and honor Slack method limits.
-Outgoing delivery and files still use the current Web API queue.
+Outgoing delivery still uses the current approved queue.
+File operations continue through the existing Web API adapter.
 The connector does not remove Slack's sending limits.
 
 - Run `a2a-notes desktop disable`.

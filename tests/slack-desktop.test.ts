@@ -9,6 +9,8 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { SlackDesktopHook, desktopURL, desktopEvent, DESKTOP_IDENTITY } from '../src/slack-desktop.ts';
 import { TransportError } from '../src/transport.ts';
 import { fakeWorkspace, personService, person, agent, MARIO, ALEX, rid } from './helpers.ts';
+import { encode } from '../src/protocol.ts';
+import { slackText } from '../src/slack-format.ts';
 
 test('the renderer identity reads the account button and returns only account IDs', () => {
   const component = { type: { displayName: 'User' }, memoizedProps: { currentUserId: MARIO, access: 'private' } };
@@ -189,4 +191,17 @@ test('native human replies keep the original audience, note, sender, and accepta
   assert.equal(note.reply_to_local!.metadata!['taskboard.task_id'], 'origin'); assert.equal(note.owner_message, false);
   owner.service.approve(person, {id: note.id, expected_hash: note.hash, decision: 'approve'});
   assert.equal(owner.service.get(agent, note.id).body, '');
+});
+
+test('native incoming notes read the current Slack wrapper and retain person privacy', async t=>{
+  const fake=await fakeWorkspace(),owner=personService(fake,MARIO),remote=await cdp(t),id=crypto.randomUUID();
+  const text=slackText(encode({id,from:`slack:TEXAMPLE:${ALEX}`,to:`slack:TEXAMPLE:${MARIO}`,subject:'Wrapper check',audience:'person',threadId:id,replyTo:null,
+    body:'Please check this note.',files:[],transportFiles:{}}),{subject:'Wrapper check',senderName:'Alex',body:'Please check this note.',audience:'person',files:[]});
+  assert.ok(!text.startsWith('A2ANotes'));const ts=fake.inject(ALEX,MARIO,text),channel=[...fake.channels.values()][0].id;
+  const hook=new SlackDesktopHook({config:{url:remote.url},dir:owner.dir,identity:()=>owner.transport.identity(),verifyEndpoint:async()=>{},
+    verifyChannel:c=>owner.transport.verifyDesktopChannel(c),receive:m=>owner.service.receive(m)});
+  t.after(async()=>{await hook.close();await owner.service.stop();await fake.close();});hook.start();await wait(()=>hook.status().listening);
+  remote.event({type:'message',channel,user:ALEX,text,ts});await wait(()=>owner.service.list(person,{direction:'incoming'}).messages.length===1);
+  const note=owner.service.list(person,{direction:'incoming'}).messages[0];assert.equal(note.message_id,id);assert.equal(note.state,'held');
+  assert.equal(note.audience,'person');assert.equal(owner.service.get(agent,note.id).body,'');
 });

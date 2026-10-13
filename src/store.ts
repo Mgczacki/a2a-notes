@@ -24,6 +24,7 @@ export interface Delivery {
 }
 export interface SendCheckpoint {
   channel?: string; postStarted?: boolean; reconcileCursor?: string;
+  postTransport?: 'web-api' | 'desktop';
   uploads: Record<string, { fileId: string; url: string; phase: 'allocated' | 'uploaded' | 'completing' | 'complete' }>;
 }
 export interface Note {

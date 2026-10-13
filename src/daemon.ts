@@ -32,6 +32,7 @@ export function readConfig(dir: string): Config {
   if (!Number.isInteger(config.port) || config.port < 0 || config.port > 65535) throw new Error('config.json needs a port.');
   if (!config.slack?.clientId || !config.slack.teamId || !config.slack.redirectUri) throw new Error('config.json needs slack.clientId, slack.teamId, and slack.redirectUri.');
   if (config.desktop) desktopURL(config.desktop.url);
+  if (config.desktop?.send !== undefined && typeof config.desktop.send !== 'boolean') throw new Error('desktop.send must be true or false.');
   return config;
 }
 
@@ -78,6 +79,7 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
         identity: () => slack.identity(), verifyChannel: channel => slack.verifyDesktopChannel(channel),
         receive: event => owner.receive(event), connection: active => owner.setDesktopListening(active) });
       service.desktopStatus = () => desktop!.status();
+      slack.desktopSender = desktop;
     }
     const clients = new Clients(dir);
     // the local secret lets the command-line tool on this account ask the running service for a page sign-in code

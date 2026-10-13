@@ -142,7 +142,7 @@ test('the stdio bridge connects a command-line agent to the running service', as
 
 test('a person session gets a Slack sign-in link that returns to a local page, and healthz reports the version', async () => {
   const health = await (await fetch(`${alex.running.server.url}/healthz`)).json();
-  assert.deepEqual(health, { ok: true, version: '0.8.1' });
+  assert.deepEqual(health, { ok: true, version: '0.9.0' });
   const human = await connect(alex.url, alex.token('signin-person', 'person'));
   const agentClient = await connect(alex.url, alex.token('signin-agent', 'agent'));
   assert.ok(!(await agentClient.listTools()).tools.some(t => t.name === 'a2anotes_slack_sign_in'), 'only a person session can start a sign-in');

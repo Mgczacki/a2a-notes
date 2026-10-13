@@ -21,7 +21,7 @@ const usage = `a2a-notes <command>
   token list | token remove <name>
   open                                    print a one-time link to the review page
   status                                  print the connection and scan status
-  desktop enable --url http://127.0.0.1:P  save the optional Slack Desktop endpoint
+  desktop enable --url http://127.0.0.1:P [--send]  save the optional endpoint and native send preference
   desktop disable                         remove the endpoint from config
   desktop probe --url URL [--seconds 30]   check the installed app without delivering notes
   stop                                    stop the running service
@@ -77,7 +77,7 @@ switch (cmd) {
     const config = readConfig(dir);
     if (sub === 'enable') {
       const url = desktopURL(flag('--url') || '').origin;
-      config.desktop = { url }; savePrivate(join(dir, 'config.json'), config);
+      config.desktop = { url, ...(has('--send') ? {send:true} : {}) }; savePrivate(join(dir, 'config.json'), config);
       console.log('Saved the Slack Desktop endpoint. Restart A2A Notes to connect.');
     } else if (sub === 'disable') {
       delete config.desktop; savePrivate(join(dir, 'config.json'), config);
@@ -89,7 +89,7 @@ switch (cmd) {
       const slack = new SlackTransport(join(dir, 'slack-credentials.json'), config.slack);
       const temporary = mkdtempSync(join(tmpdir(), 'a2a-desktop-probe-'));
       let events = 0;
-      const hook = new SlackDesktopHook({ config: { url }, dir: temporary, identity: () => slack.identity(),
+      const hook = new SlackDesktopHook({ config: { url, send:has('--send') || config.desktop?.send === true }, dir: temporary, identity: () => slack.identity(),
         verifyChannel: channel => slack.verifyDesktopChannel(channel), receive: async () => { events++; } });
       try {
         hook.start();

@@ -2,6 +2,9 @@
 // messages, uploads and downloads files, and scans direct message history. Addresses are slack:<team ID>:<member ID>.
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { DesktopDeliveries } from './slack-desktop-delivery.ts';
+import { DesktopUnavailableError, type SlackDesktopHook } from './slack-desktop.ts';
 import { savePrivate } from './store.ts';
 import { TransportError, type Identity, type Person, type Received, type SendInput, type Transport } from './transport.ts';
 import { checkProjectLink, slackBlocks, slackText, readSlackText, MAX_SLACK_TEXT } from './slack-format.ts';
@@ -40,6 +43,7 @@ export function parseSlackAddress(address: string) {
 }
 
 export class SlackTransport implements Transport {
+  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'>;
   readonly name = 'slack';
   readonly fileField = 'Slack';
   private generation = 0;
@@ -303,9 +307,26 @@ export class SlackTransport implements Transport {
       files[f.id] = upload.fileId;
     }
     // people read the blocks; `text` carries the exact A2ANotes/1 text as a JSON string (src/slack-format.ts)
-    checkpoint.postStarted = true; save();
+    const startPost = () => {
+      if (this.identity()?.address !== slackAddress(c.team,c.user)) throw new TransportError('The Slack account changed before posting.', true);
+      checkpoint.postStarted = true; save();
+    };
+    const text = slackText(input.wire(files), input.display);
+    const blocks = JSON.stringify(slackBlocks(input.display, { projectLink: this.projectLink }));
     let result;
-    try { result = await this.call('chat.postMessage', { channel, text: slackText(input.wire(files), input.display), blocks: JSON.stringify(slackBlocks(input.display, { projectLink: this.projectLink })), mrkdwn: 'false',
+    if (this.desktopSender?.canSend()) {
+      checkpoint.postTransport = 'desktop';
+      try {
+        result = await this.desktopSender.post({team:c.team,owner:c.user,to:input.to,channel,messageId:input.messageId,text,blocks,
+          ...(input.threadTs ? {threadTs:input.threadTs} : {})},startPost);
+        return {channel,ts:result.ts,files};
+      } catch (error) {
+        if (error instanceof TransportError && error.definite) {checkpoint.postStarted = false;save();}
+        if (!(error instanceof DesktopUnavailableError)) throw error;
+      }
+    }
+    checkpoint.postTransport = 'web-api'; startPost();
+    try { result = await this.call('chat.postMessage', { channel, text, blocks, mrkdwn: 'false',
       unfurl_links: 'false', unfurl_media: 'false', parse: 'none', client_msg_id: input.messageId,
       ...(input.threadTs ? { thread_ts: input.threadTs, reply_broadcast: 'true' } : {}) }); }
     catch (error) {
@@ -318,6 +339,8 @@ export class SlackTransport implements Transport {
 
   async findSent(to: string, messageId: string, since?: string, progress?: { cursor?: string; save: (cursor?: string) => void }) {
     const c = this.self();
+    const native = new DesktopDeliveries(dirname(this.file)).receipt(c.team,c.user,to,messageId);
+    if (native) return native;
     const channel = await this.openConversation(to);
     let cursor = progress?.cursor || '';
     for (let pages = 0; pages < 1000; pages++) {

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+- Add an optional preference for sending approved notes through the installed Slack app.
+- Verify the native API code before it sends. Unknown code uses the existing API path before any native attempt.
+- Preserve the current wire text and displayed blocks. Keep sender checks and file checkpoints.
+- Give each native request one SDK attempt. A2A Notes controls further attempts under the current approval rules.
+- Store native attempts and receipts before returning delivery results.
+- Preserve native Retry-After across restart. Do not switch adapters after uncertain delivery.
+- Read the displayed Slack wrapper in native events. Ignore outgoing echoes as incoming instructions.
+- Show native send availability in connection status.
+
 ## 0.8.1
 
 - Recheck the Slack port owner before each new debugger connection.
