@@ -255,7 +255,7 @@ test('native unavailability or a disabled sender stops before posting without wi
   let checkpoint:any;
   f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new DesktopUnavailableError();}};
   await assert.rejects(f.transport.send({...input,saveCheckpoint:c=>{checkpoint=structuredClone(c);}}),(e:any)=>e.failureCode==='app_control_unavailable'&&e.definite);
-  assert.equal(checkpoint.postStarted,false);
+  assert.equal(checkpoint.postStarted,undefined);assert.equal(checkpoint.channel,'DOTHER01');
   f.transport.desktopSender={canSend:()=>true,status:()=>({sendEnabled:false} as any),post:async()=>{throw new Error('Must not post');}};
   await assert.rejects(f.transport.send(input),/sending is turned off/);
   f.transport.desktopSender=undefined;

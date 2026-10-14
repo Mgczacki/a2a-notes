@@ -174,9 +174,6 @@ export class SlackTransport implements Transport {
     return this.run(async (app, s) => {
       if (user === s.user && !this.config.allowSelf) throw new TransportError('Choose another workspace member.', true);
       const notReady = () => new TransportError('Slack native sending is not ready. No post was started.', true, 0, 'slack.desktop', undefined, undefined, 'app_control_unavailable');
-      if (!this.desktopSender || this.desktopSender.status?.().sendEnabled === false)
-        throw new TransportError('Slack Desktop native sending is turned off. Run a2a-notes desktop enable with --send. No post was started.', true,
-          0, 'slack.desktop', undefined, undefined, 'app_control_unavailable');
       const checkpoint = input.checkpoint || {uploads: {}};
       // A saved checkpoint lets a lost read before posting return to the queue instead of becoming uncertain.
       input.saveCheckpoint?.(checkpoint);
@@ -187,16 +184,21 @@ export class SlackTransport implements Transport {
       checkpoint.channel = channel;
       for (const f of input.files) checkpoint.uploads[f.id] = {fileId:files[f.id], url:'slack-app:inline', phase:'complete'};
       input.saveCheckpoint?.(checkpoint);
-      try { await this.wait(app, s => s.channel === channel && this.desktopSender!.canSend()); }
+      // The saved conversation lets a2anotes_retry_send queue the same note after the setting changes.
+      if (!this.desktopSender || this.desktopSender.status?.().sendEnabled === false)
+        throw new TransportError('Slack Desktop native sending is turned off. Run a2a-notes desktop enable with --send. No post was started.', true,
+          0, 'slack.desktop', undefined, undefined, 'app_control_unavailable');
+      const sender = this.desktopSender;
+      try { await this.wait(app, s => s.channel === channel && sender.canSend()); }
       catch (error) {
         if (error instanceof TransportError && !error.definite) throw notReady();
         throw error;
       }
-      if (this.desktopSender.canSend() !== true) throw notReady();
+      if (sender.canSend() !== true) throw notReady();
       {
         checkpoint.postTransport = 'desktop';
         try {
-          const receipt = await this.desktopSender!.post({team:s.team, owner:s.user, to:input.to, channel,
+          const receipt = await sender.post({team:s.team, owner:s.user, to:input.to, channel,
             messageId:input.messageId, text, blocks:JSON.stringify(slackBlocks(input.display, {projectLink:this.config.projectLink})),
             ...(input.threadTs ? {threadTs:input.threadTs} : {})}, () => {
               if (this.disabled || this.generation !== generation || this.binding?.team !== s.team || this.binding?.user !== s.user)
@@ -205,7 +207,7 @@ export class SlackTransport implements Transport {
             });
           return {...receipt,files};
         } catch (error) {
-          if (error instanceof TransportError && error.definite) {checkpoint.postStarted=false;input.saveCheckpoint?.(checkpoint);}
+          if (error instanceof TransportError && error.definite && checkpoint.postStarted) {checkpoint.postStarted=false;input.saveCheckpoint?.(checkpoint);}
           if (error instanceof DesktopUnavailableError) throw notReady();
           throw error;
         }
