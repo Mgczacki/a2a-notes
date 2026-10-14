@@ -37,7 +37,7 @@ button:focus-visible, select:focus-visible { outline:3px solid #72a8d3; outline-
 ${signedIn ? `
 <section class="panel"><h2>Connection</h2><div class="row" id="connection"></div></section>
 <section class="panel"><h2>Levels</h2><div class="row" id="levels"></div><p class="small">Level 1: you approve every message. Level 2: your review agent approves ordinary messages to or from trusted senders. Level 3: it also approves trusted messages that the check is unsure about.</p></section>
-<section class="panel"><div class="row"><h2 style="margin:0">Messages</h2><button id="sync">Check Slack now</button></div><p id="error" role="alert"></p><div id="messages"></div></section>
+<section class="panel"><div class="row"><h2 style="margin:0">Messages</h2><button id="sync">Check Slack now</button></div><p class="small">The app limits each Slack attachment to 2 MiB. Agent request data stays inline and has a 26,000-byte limit. The complete note text must fit within 39,000 bytes. A draft that exceeds these limits cannot be approved.</p><p id="error" role="alert"></p><div id="messages"></div></section>
 <section class="panel"><h2>Recent actions</h2><div id="audit" class="small"></div></section>
 <script>
 const $ = s => document.querySelector(s);
@@ -79,9 +79,9 @@ function card(m, trusted) {
     m.body_check && m.body_check.flags.length ? el('ul', { class: 'flags' }, m.body_check.flags.map(f => el('li', {}, f.reason + (f.text && f.code !== 'ask_changed' ? ' Text: “' + f.text + '”' : '')))) : null,
     m.body_check && m.body_check.warnings && m.body_check.warnings.length ? el('ul', { class: 'flags' }, m.body_check.warnings.map(w => el('li', {}, 'Format: ' + w.reason + (w.text ? ' Text: “' + w.text + '”' : '')))) : null,
     m.body_check && m.body_check.instruction === 'unavailable' && m.direction === 'out' ? el('p', { class: 'small' }, 'No instruction was given, so the check cannot say that the ask matches it.') : null,
-    m.agent_file ? el('p', { class: 'small' }, 'Agent file: ' + m.agent_file.name + ' · ' + m.agent_file.size + ' bytes · SHA-256 ' + m.agent_file.sha256) : null,
+    m.agent_file ? el('p', { class: 'small' }, 'Inline agent request data: ' + m.agent_file.name + ' · ' + m.agent_file.size + ' bytes · SHA-256 ' + m.agent_file.sha256) : null,
     m.agent_file && m.agent_file.data ? el('details', {}, el('summary', {}, 'Show the agent file'), el('pre', {}, JSON.stringify(m.agent_file.data, null, 2))) : null,
-    m.files.length ? el('p', { class: 'small' }, 'Files: ' + m.files.map(f => f.name + ' (' + f.size + ' bytes)').join(', ')) : null,
+    m.files.length ? el('p', { class: 'small' }, (m.direction === 'out' ? m.state === 'sent' ? 'Slack attachments: ' : 'Files to attach in Slack: ' : 'Supporting files: ') + m.files.map(f => f.name + ' (' + f.size + ' bytes)').join(', ')) : null,
     m.failure ? el('div', {}, el('p', { class: 'status bad' }, m.failure.code), el('p', {}, m.failure.reason), m.failure.raw ? el('details', {}, el('summary', {}, 'Show the received text'), el('pre', {}, m.failure.raw)) : null) : null,
     m.delivery && m.delivery.nextAttemptAt ? el('p', { class: 'small' }, 'Next attempt: ' + m.delivery.nextAttemptAt + (m.delivery.lastMethod ? ' · Slack method: ' + m.delivery.lastMethod : '')) : null,
     m.delivery && m.delivery.stoppedAt ? el('p', { class: 'small' }, 'Final failure: ' + m.delivery.failureCode + ' at ' + m.delivery.stoppedAt) : null,

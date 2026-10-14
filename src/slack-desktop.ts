@@ -8,7 +8,7 @@ import { readSlackText, DATA_MARKER } from './slack-format.ts';
 import { savePrivate } from './store.ts';
 import { TransportError, type Identity, type Received } from './transport.ts';
 import { DesktopDeliveries } from './slack-desktop-delivery.ts';
-import { NATIVE_FUNCTIONS, type DesktopPost, type DesktopReaction, type DesktopRead, type NativeResult } from './slack-desktop-native.ts';
+import { NATIVE_FUNCTIONS, type DesktopPost, type DesktopReaction, type DesktopRead, type DesktopFile, type NativeResult } from './slack-desktop-native.ts';
 import { decode } from './protocol.ts';
 
 export interface DesktopConfig { url: string; send?: boolean }
@@ -70,6 +70,23 @@ export async function verifySlackDesktopEndpoint(endpoint: URL): Promise<void> {
   }
 }
 
+// A ticket from the signed-in app grants one binary upload. This is the only direct Slack HTTP request.
+export async function uploadSignedFile(value: string, bytes: Buffer, fetcher: typeof fetch = fetch) {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new TransportError('The Slack upload ticket URL is invalid.', true); }
+  if (url.protocol !== 'https:' || url.hostname !== 'files.slack.com' || !url.pathname.startsWith('/upload/') ||
+      url.username || url.password || url.hash || !Buffer.isBuffer(bytes))
+    throw new TransportError('The Slack upload ticket or bytes are invalid.', true);
+  if (bytes.length < 1 || bytes.length > 2 * 1024 * 1024)
+    throw new TransportError('The Slack upload bytes are invalid.', true);
+  let response: Response;
+  try { response = await fetcher(url.href, {method:'POST',body:new Uint8Array(bytes),
+    headers:{'content-type':'application/octet-stream'},credentials:'omit',redirect:'error',signal:AbortSignal.timeout(30_000)}); }
+  catch { throw new TransportError('The signed Slack upload did not confirm the bytes.', false, 0, 'files.upload'); }
+  if (!response.ok) throw new TransportError('The signed Slack upload failed.',response.status>=400&&response.status<500,
+    0,'files.upload',response.status);
+}
+
 function slackSocket(value: unknown): boolean {
   try { const u = new URL(String(value)); return u.protocol === 'wss:' && !u.username && !u.password && (!u.port || u.port === '443') && (u.hostname === 'slack.com' || u.hostname.endsWith('.slack.com')); }
   catch { return false; }
@@ -107,6 +124,8 @@ export class SlackDesktopHook {
   private nativeLimitsFile: string;
   private reactionLimits: Record<string, number>;
   private reactionLimitsFile: string;
+  private fileLimits: Record<string, number>;
+  private fileLimitsFile: string;
   private readLimits = new Map<string, number>();
   private deliveries: DesktopDeliveries;
   private requests = new Map<number, {socket:WebSocket; resolve:(value:any)=>void; reject:(error:Error)=>void; timer:ReturnType<typeof setTimeout>}>();
@@ -116,6 +135,7 @@ export class SlackDesktopHook {
     receive: (event: Received) => Promise<void>;
     connection?: (connected: boolean) => void;
     fetcher?: typeof fetch;
+    uploadFetcher?: typeof fetch;
     verifyEndpoint?: (endpoint: URL) => Promise<void>;
   }) {
     this.endpoint = desktopURL(options.config.url);
@@ -128,6 +148,10 @@ export class SlackDesktopHook {
     this.reactionLimits = existsSync(this.reactionLimitsFile) ? JSON.parse(readFileSync(this.reactionLimitsFile, 'utf8')) : {};
     if (!this.reactionLimits || Array.isArray(this.reactionLimits) || Object.entries(this.reactionLimits).some(([team, at]) => !/^T[A-Z0-9]+$/.test(team) || !Number.isFinite(at) || at < 0))
       throw new Error('The saved reaction rate limits could not be checked.');
+    this.fileLimitsFile = join(options.dir, 'desktop-file-limits.json');
+    this.fileLimits = existsSync(this.fileLimitsFile) ? JSON.parse(readFileSync(this.fileLimitsFile, 'utf8')) : {};
+    if (!this.fileLimits || Array.isArray(this.fileLimits) || Object.entries(this.fileLimits).some(([key, at]) => !/^T[A-Z0-9]+:(ticket|complete)$/.test(key) || !Number.isFinite(at) || at < 0))
+      throw new Error('The saved file rate limits could not be checked.');
     this.statusValue.sendEnabled = options.config.send === true;
     this.file = join(options.dir, 'desktop-events.json');
     const saved = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : [];
@@ -243,6 +267,44 @@ export class SlackDesktopHook {
     const retryAfter = Number.isFinite(result?.retryAfter) && result!.retryAfter! > 0 ? result!.retryAfter! : 0;
     if (result?.status === 429 || code === 'ratelimited') this.readLimits.set(input.method, Date.now() + Math.max(1, retryAfter || 60)*1000);
     throw new TransportError(`Slack Desktop: ${code}`, result?.definite === true, retryAfter, input.method, result?.status);
+  }
+  private async callFile(input: DesktopFile): Promise<NativeResult & {fileId?: string; url?: string}> {
+    if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}`)
+      throw new TransportError('The native file account changed.', true);
+    const method = input.operation === 'complete' ? 'files.completeUploadExternal' : 'files.getUploadURLExternal';
+    const limitKey = `${input.team}:${input.operation}`;
+    const limited = this.fileLimits[limitKey] || 0;
+    if (limited > Date.now()) throw new TransportError(`Slack Desktop is waiting after a ${method} rate limit.`, true,
+      Math.ceil((limited-Date.now())/1000), method, 0);
+    try { await (this.options.verifyEndpoint || verifySlackDesktopEndpoint)(this.endpoint); } catch { throw new DesktopUnavailableError(); }
+    const target = this.readyTarget();
+    if (this.stopped || !target || !this.options.config.send) throw new DesktopUnavailableError();
+    const reply = await this.request(this.sockets.get(target)!, 'Runtime.callFunctionOn', {
+      objectId:this.nativeTargets.get(target), functionDeclaration:NATIVE_FUNCTIONS.file,
+      arguments:[{value:input}],returnByValue:true,awaitPromise:true}, 25_000);
+    const result = reply.result?.value as (NativeResult & {fileId?: string; url?: string}) | undefined;
+    if (result?.ok === true) return result;
+    const code = typeof result?.error === 'string' && /^[a-z_]{1,80}$/.test(result.error) ? result.error : 'file_failed';
+    if (code === 'native_interface_changed') throw new DesktopUnavailableError();
+    const retryAfter = Number.isFinite(result?.retryAfter) && result!.retryAfter! > 0 ? result!.retryAfter! : 0;
+    if (result?.status === 429 || code === 'ratelimited') {
+      this.fileLimits[limitKey] = Date.now() + Math.max(1, retryAfter || 60)*1000;
+      savePrivate(this.fileLimitsFile, this.fileLimits);
+    }
+    throw new TransportError(result?.definite ? `Slack Desktop: ${code}` : 'Slack Desktop file delivery is uncertain.',
+      result?.definite === true, retryAfter, method, result?.status, result?.requestId);
+  }
+  async uploadFile(input: {team:string;owner:string;name:string;bytes:Buffer}, saveTicket:(fileId:string)=>void) {
+    const ticket=await this.callFile({team:input.team,owner:input.owner,operation:'ticket',name:input.name,length:input.bytes.length});
+    if(!ticket.fileId||!ticket.url)throw new TransportError('Slack did not provide a file upload ticket.',false);
+    saveTicket(ticket.fileId);
+    if(this.options.identity()?.address!==`slack:${input.team}:${input.owner}`||!this.canSend())
+      throw new TransportError('The signed-in Slack account changed before upload.',true);
+    await uploadSignedFile(ticket.url,input.bytes,this.options.uploadFetcher||fetch);
+    return ticket.fileId;
+  }
+  async completeFile(input: Omit<DesktopFile,'operation'>) {
+    return this.callFile({...input,operation:'complete'});
   }
   // Posts one fixed delivery notice. The operation ID becomes the Slack client message ID.
   async notice(input: {team: string; owner: string; channel: string; operationId: string; text: string}) {

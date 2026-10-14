@@ -12,7 +12,7 @@ import { checkPolicy, incomingApprover, outgoingApprover, type Approver, type Po
 import { checkOutgoingBody, fileTextForChecks, review, type BodyCheck, type BodyChecker, type ReviewResult, type Reviewer } from './checks.ts';
 import { noteHash, ServiceError, Store, type Data, type AgentDeliveryStatus, type Metadata, type Note, type Role, type StoredFile } from './store.ts';
 import { Acknowledgements } from './acknowledgement.ts';
-import { TransportError, type Received, type Transport } from './transport.ts';
+import { TransportError, type Received, type SendInput, type Transport } from './transport.ts';
 
 export interface Session { name: string; role: Role; humanApproval?: boolean }
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -388,6 +388,7 @@ export class NotesService {
       ...(threadTs ? { transport: { name: this.transport.name, threadTs } } : {}), created: now, updated: now,
     };
     note.hash = noteHash(note, files);
+    this.checkDraftTransport(note, data, identity.name);
     const finish = await this.check(note, files);
     this.store.change(d => {
       if (d.requests[requestId]) return;
@@ -415,6 +416,9 @@ export class NotesService {
     if (fields.agentFile) next.agentFileId = fields.agentFile.id; else delete next.agentFileId;
     delete next.approval; delete next.rejected; delete next.error; delete next.delivery; delete next.checkpoint;
     next.hash = noteHash(next, files);
+    const identity = this.transport.identity();
+    if (!identity || identity.address !== next.from) throw new ServiceError('not_connected', 'Connect the original Slack app account before revising this draft.');
+    this.checkDraftTransport(next, data, identity.name);
     const finish = await this.check(next, files);
     this.store.update(n.id, (x, d) => {
       if (x.hash !== n.hash) throw new ServiceError('hash_changed', 'The draft changed during the revision.', 'Read it again.');
@@ -520,6 +524,11 @@ export class NotesService {
       const approver = this.approverFor(n, data);
       if (approver === 'nobody') throw new ServiceError('not_approvable', 'The checks hold this message. Nobody can approve it.', 'The person can inspect it on the review page.');
       if (session.role === 'reviewer' && approver !== 'reviewer') throw new ServiceError('needs_person', 'This message needs the person to decide.', 'Ask the person to open the review page.');
+      if (n.direction === 'out' && input.decision === 'approve') {
+        const identity = this.transport.identity();
+        if (!identity || identity.address !== n.from) throw new ServiceError('not_connected', 'Connect the original Slack app account before approval.');
+        this.checkDraftTransport(n, data, identity.name);
+      }
       const at = new Date().toISOString();
       if (input.decision === 'reject') { n.state = 'rejected'; n.rejected = { actor: session.name, at, ...(typeof input.review_context === 'string' && input.review_context.trim() ? { comment: input.review_context.slice(0, 2000) } : {}) }; delete n.approval; }
       else {
@@ -539,6 +548,25 @@ export class NotesService {
     return { id: n.messageId, from: n.from, to: n.to, subject: n.subject, audience: n.audience, threadId: n.threadId, replyTo: n.replyTo, body: n.body,
       ...(agent ? { agentFile: ref(agent) } : {}), files: files.filter(f => f.kind === 'support').map(ref),
       transportFiles: Object.keys(fileMap).length ? { [this.transport.fileField]: fileMap } : {}, footer: footerFor(senderName) };
+  }
+
+  private checkDraftTransport(n: Note, data: Data, senderName: string) {
+    if (!this.transport.checkDraft) return;
+    const files = this.files(data, n), agent = files.find(f => f.kind === 'agent');
+    const input: SendInput = {
+      to: n.to, messageId: n.messageId, threadTs: n.transport?.threadTs,
+      files: files.map(f => ({id: f.id, name: f.name, bytes: this.store.readFileBytes(f)})),
+      wire: map => encode(this.buildWire(n, data, map, senderName)),
+      display: {messageId: n.messageId, subject: n.subject, body: n.body, audience: n.audience, senderName,
+        ...(agent ? {agentFile: {name: agent.name, size: agent.size}} : {}),
+        files: files.filter(f => f.kind === 'support').map(f => ({name: f.name, size: f.size}))},
+    };
+    try { this.transport.checkDraft(input); }
+    catch (error) {
+      if (error instanceof TransportError || error instanceof ProtocolError)
+        throw new ServiceError('transport_limit', (error as Error).message, 'Revise the draft before approval.');
+      throw error;
+    }
   }
 
   async send(session: Session, input: { id?: unknown; expected_hash?: unknown; request_id?: unknown }) {
@@ -658,6 +686,7 @@ export class NotesService {
       if (delivery.uncertain || n.checkpoint?.postStarted) {
         const found = await this.transport.findSent(n.to, n.messageId, n.sendStartedAt, {
           cursor: n.checkpoint?.reconcileCursor,
+          expectedFiles: files.filter(f => f.kind === 'support').map(f => ({name: f.name, size: f.size})),
           save: cursor => this.store.update(id, x => {
             x.checkpoint ||= { uploads: {}, postStarted: true };
             x.checkpoint.reconcileCursor = cursor;

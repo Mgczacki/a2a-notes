@@ -181,19 +181,25 @@ It reads Slack records through the app's own API client in the background.
 It never changes the open conversation, types in the composer, or clicks a Slack control.
 It confirms the recipient with `conversations.open` and `users.info`.
 
-The adapter saves `postStarted` before it calls `chat.postMessage`.
-Slack must return the matching channel and timestamp before delivery becomes `sent`.
+The adapter saves `postStarted` before it posts text through `chat.postMessage`.
+For a note with files, it saves `postStarted` before `files.completeUploadExternal` shares the files and note text.
+Slack must show the matching message ID and files before delivery becomes `sent`.
 After an uncertain post, the adapter searches recent conversation records for that message ID.
 It never repeats an uncertain post.
 
 The service retains its retry deadlines and attempt limit.
-The app transport does not use HTTP status codes or Slack method quotas.
+The adapter handles Slack method limits and HTTP errors from the signed file upload URL.
 Existing queue records remain readable.
-Small attachments travel as encoded data in the original message.
-The adapter checks the original sender and message reference before it returns attachment bytes.
+Agent request data travels inline in the original message, with a 26,000-byte limit.
+The signed-in app grants each supporting file an upload URL.
+The adapter sends only the checked bytes to that Slack URL, without a cookie or token.
+It then shares the file through the app's native client.
+Slack shows the file as an attachment, with a 2 MiB adapter limit per file.
+The adapter checks the original sender and message reference before it returns file bytes through the app.
+It reads attachment metadata with `files.info` before download.
 The protocol still checks each attachment hash.
 A complete app message must fit within 39,000 bytes.
-Larger attachments fail before posting.
+Draft creation, revision, and approval check these limits before posting.
 Older API file references cannot be downloaded through this connector.
 Old files remain in the local store.
 
@@ -315,7 +321,6 @@ That adapter rejects remote API endpoints and never runs in the normal service.
 ## Open items
 
 - Verify sends and reactions against the installed Slack app before release.
-- Add native app file controls for larger attachments.
 - Add recovery beyond messages available in the app.
 - Support workspace directory search through app controls.
 

@@ -7,7 +7,7 @@ import { END_MARKER, FILE_VERSION, WIRE_VERSION } from './protocol.ts';
 import { ServiceError } from './store.ts';
 import type { NotesService, Session } from './service.ts';
 
-export const VERSION = '0.12.0';
+export const VERSION = '0.13.0';
 // The body format and writing rules for the draft tools (docs/WRITING-MESSAGES.md has the full text and examples).
 export const BODY_GUIDE = [
   'Write the body for a person who has none of your context: why they get the message, the facts they need, one ask, and a date if one applies.',
@@ -76,13 +76,13 @@ export function createMcpServer(service: NotesService, session: Session, extra: 
     args => run(() => service.get(session, args.id), v => `${v.direction === 'in' ? 'From' : 'To'} ${v.direction === 'in' ? v.from : v.to}: ${v.subject} (${v.state}).`));
 
   server.registerTool('a2anotes_stage_file', {
-    description: 'Stores a file for a later draft. kind agent: an a2anotes.request/1 JSON file with one trailing LF. Give the exact bytes as text or content_base64, or a path inside the service staging folder, and their SHA-256 hash.',
+    description: 'Stores a file for a later draft. kind agent stays inline and is limited to 26,000 bytes. kind support becomes a visible Slack attachment and is limited to 2 MiB. Give the exact bytes as text or content_base64, or a path inside the service staging folder, and their SHA-256 hash.',
     inputSchema: { name: z.string().max(200).optional(), text: z.string().max(10_485_760).optional(), content_base64: z.string().max(14_000_000).optional(), path: z.string().max(1000).optional(),
       sha256: z.string().regex(/^[0-9a-f]{64}$/), kind: z.enum(['agent', 'support']).optional(), request_id: z.string() },
   }, args => run(() => service.stageFile(session, args), v => `Staged ${v.name} as ${v.file_id}.`));
 
   server.registerTool('a2anotes_create_draft', {
-    description: `Creates a draft. No send occurs. For audience agent or both, stage the agent file first: the draft uses its message_id. ${BODY_GUIDE} The result lists format warnings with the fix; a warning does not block the draft. Pass instruction with the request that authorized this message so the check can compare the ask. metadata is client data with a client prefix (for example myclient.task_id); it stays local and is never sent.`,
+    description: `Creates a draft. No send occurs. The app checks file and 39,000-byte note limits before approval. For audience agent or both, stage the agent file first: the draft uses its message_id. ${BODY_GUIDE} The result lists format warnings with the fix; a warning does not block the draft. Pass instruction with the request that authorized this message so the check can compare the ask. metadata is client data with a client prefix (for example myclient.task_id); it stays local and is never sent.`,
     inputSchema: { to_address: z.string().max(250), subject: z.string().max(400), body: z.string().max(20_000), audience, agent_file_id: z.string().max(100).optional(),
       thread_id: z.string().max(100).optional(), reply_to: z.string().max(100).optional(), file_ids: z.array(z.string().max(100)).max(4).optional(), request_id: z.string(), instruction: z.string().max(4000).optional(), metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional() },
   }, args => run(() => service.createDraft(session, args), v => `Draft ${v.id} created. Hash ${v.hash}. Approver: ${v.approver}. Body flags: ${v.body_flags}. Format warnings: ${v.format_warnings ?? 0}.${warningText(v)}`));

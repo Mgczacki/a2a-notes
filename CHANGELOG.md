@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.0
+
+- Send supporting Markdown files as visible Slack attachments through the signed-in app adapter.
+- Send file bytes to a signed `files.slack.com` upload URL from the adapter host. This is the only direct Slack HTTP request.
+- Keep agent request data inline. Check the 26,000-byte inline limit, 2 MiB file limit, and 39,000-byte text limit before approval.
+- Save the file ID and upload phase without the URL. Check the posted message ID, file names, sizes, and downloaded hashes.
+- Start a new ticket after a lost binary upload. Reconcile an uncertain file share without a second completion call.
+- Keep a definite file completion failure retryable. Save each file method's rate limit and request ID.
+- Permit `files.info` to read the metadata for a received attachment.
+
 ## 0.12.0
 
 - Stop operating the Slack window. The adapter no longer navigates, types in the composer, or clicks controls.

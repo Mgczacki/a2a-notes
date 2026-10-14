@@ -4,7 +4,7 @@ import WebSocket from 'ws';
 import { desktopURL, verifySlackDesktopEndpoint, DESKTOP_IDENTITY } from './slack-desktop.ts';
 import { TransportError } from './transport.ts';
 
-export interface AppMessage { channel: string; user: string; text: string; ts: string; thread_ts?: string; bot_id?: string; app_id?: string; subtype?: string; client_msg_id?: string; reactions: {name: string; users: string[]}[] }
+export interface AppMessage { channel: string; user: string; text: string; ts: string; thread_ts?: string; bot_id?: string; app_id?: string; subtype?: string; client_msg_id?: string; reactions: {name: string; users: string[]}[]; files?: {id:string;name:string;size:number}[] }
 export interface AppPerson { id: string; name: string; realName: string; title: string; active: boolean }
 export interface AppSnapshot { team: string; user: string; channel?: string; peers: {id: string; user: string}[]; people: AppPerson[]; messages: AppMessage[] }
 // None of these operations focus, navigate, type in, or click the Slack window.
@@ -17,6 +17,7 @@ export interface AppConnection {
   // Loads recent records of more direct conversations. The selected conversation does not change.
   load(channelsOrUsers: string[]): Promise<void>;
   directory(): Promise<AppPerson[]>;
+  downloadFile?(url: string, size: number, maxBytes: number): Promise<Buffer>;
   close(): Promise<void>;
 }
 export type NativeRead = (method: string, args: Record<string, unknown>) => Promise<any>;
@@ -28,7 +29,8 @@ const DIRECTORY_PAGES = 10;
 export class BackgroundConnection implements AppConnection {
   private channel?: string;
   private messages = new Map<string, AppMessage>();
-  constructor(private account: {identity(): Promise<{team: string; user: string}>; close(): Promise<void>}, private read: NativeRead,
+  constructor(private account: {identity(): Promise<{team: string; user: string}>; close(): Promise<void>;
+    downloadFile?(url: string, size: number, maxBytes: number): Promise<Buffer>}, private read: NativeRead,
     private cache: BackgroundCache, private now: () => number = Date.now) {}
   async snapshot(): Promise<AppSnapshot> {
     const {team, user} = await this.account.identity();
@@ -93,6 +95,10 @@ export class BackgroundConnection implements AppConnection {
     }
     this.cache.directory = {people, at: this.now()}; return people;
   }
+  async downloadFile(url: string, size: number, maxBytes: number) {
+    if (!this.account.downloadFile) throw new TransportError('The signed-in Slack file download is unavailable.', true);
+    return this.account.downloadFile(url,size,maxBytes);
+  }
   async close() { await this.account.close(); }
 }
 
@@ -135,11 +141,11 @@ export class SlackAppConnection {
       await connection.identity(); return connection;
     } catch (error) {socket.terminate(); throw error;}
   }
-  private request(method: string, params: Record<string, unknown>) {
+  private request(method: string, params: Record<string, unknown>, timeoutMs = 5000) {
     if (this.socket.readyState !== WebSocket.OPEN) throw new TransportError('The Slack app connection is closed.', false);
     const id = ++this.sequence;
     return new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => {this.pending.delete(id); reject(new TransportError('The Slack app did not confirm the operation.', false));}, 5000);
+      const timer = setTimeout(() => {this.pending.delete(id); reject(new TransportError('The Slack app did not confirm the operation.', false));}, timeoutMs);
       this.pending.set(id, {resolve, reject, timer}); this.socket.send(JSON.stringify({id, method, params}));
     });
   }
@@ -153,6 +159,40 @@ export class SlackAppConnection {
       throw new TransportError('The Slack app account is still loading.', false, 1, 'slack.desktop');
     this.user ||= found.user;
     return {team: found.team as string, user: found.user as string};
+  }
+  async downloadFile(value: string, expectedSize: number, maxBytes: number) {
+    if (!Number.isInteger(expectedSize) || expectedSize < 1 || expectedSize > maxBytes || maxBytes > 2 * 1024 * 1024)
+      throw new TransportError('The Slack file size is invalid.', true);
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname !== 'files.slack.com' ||
+        url.username || url.password || url.hash)
+      throw new TransportError('The Slack app file URL is invalid.', true);
+    await this.identity();
+    const tree = await this.request('Page.getFrameTree', {});
+    const frame = tree.frameTree?.frame;
+    if (!frame?.id || !frame.url?.startsWith(`https://app.slack.com/client/${this.team}/`))
+      throw new TransportError('The Slack app workspace changed before download.', true);
+    const loaded = await this.request('Network.loadNetworkResource', {frameId:frame.id,url:url.href,
+      options:{disableCache:true,includeCredentials:true}}, 20_000);
+    const resource = loaded.resource;
+    if (!resource?.success || resource.httpStatusCode !== 200 || typeof resource.stream !== 'string')
+      throw new TransportError('The signed-in Slack app could not download the file.', false);
+    const parts: Buffer[] = []; let size = 0;
+    try {
+      for (;;) {
+        const read = await this.request('IO.read', {handle:resource.stream,size:32768}, 10_000);
+        if (typeof read.data !== 'string') throw new TransportError('The Slack app file stream is invalid.', true);
+        const part = Buffer.from(read.data, read.base64Encoded ? 'base64' : 'utf8');
+        if (!part.length && !read.eof) throw new TransportError('The Slack app file stream ended early.', false);
+        size += part.length;
+        if (size > maxBytes) throw new TransportError('The Slack app file exceeds the allowed size.', true);
+        parts.push(part);
+        if (read.eof) break;
+      }
+    } finally {await this.request('IO.close', {handle:resource.stream}).catch(() => {});}
+    await this.identity();
+    if (size !== expectedSize) throw new TransportError('The Slack app file size differs from its record.', true);
+    return Buffer.concat(parts,size);
   }
   async close() {this.socket.close();}
 }
