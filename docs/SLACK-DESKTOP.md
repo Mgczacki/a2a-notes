@@ -43,6 +43,11 @@ An uncertain post gets no second send.
 
 Acknowledgement uses the reaction control for the exact saved timestamp.
 The adapter confirms the configured reaction from the bound account.
+When native sending is selected, acknowledgement uses the app's verified `reactions.add` call.
+The call uses the original channel and timestamp.
+An existing own reaction counts as receipt confirmation.
+The service retains Retry-After and the reaction request limit across restart.
+Receipt confirmation grants no approval.
 An existing reaction from that account counts as confirmation.
 The reaction means received and grants no approval.
 

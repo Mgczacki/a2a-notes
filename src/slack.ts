@@ -28,7 +28,7 @@ export function parseSlackAddress(address: string) {
 }
 interface Binding {team: string; user: string; name: string}
 export class SlackTransport implements Transport {
-  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'> & Partial<Pick<SlackDesktopHook, 'status'>>;
+  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'> & Partial<Pick<SlackDesktopHook, 'status' | 'react'>>;
   readonly name = 'slack'; readonly fileField = 'Slack';
   private binding?: Binding;
   private verified = false;
@@ -223,6 +223,13 @@ export class SlackTransport implements Transport {
       const m = s.messages.find(m => m.channel === reference.channel && m.ts === reference.ts);
       if (!m) throw new TransportError('Open the original message in Slack before retrying acknowledgement.', true);
       if (m.reactions.some(r => r.name === emoji && r.users.includes(s.user))) return;
+      if (this.desktopSender?.react && (this.desktopSender.status?.().sendEnabled ?? true)) {
+        await this.wait(app, view => view.channel === reference.channel && this.desktopSender!.canSend());
+        try {
+          await this.desktopSender.react({team:s.team,owner:s.user,channel:reference.channel,ts:reference.ts,name:emoji});
+          return;
+        } catch(error) {if(!(error instanceof DesktopUnavailableError))throw error;}
+      }
       await app.react(reference.ts, emoji);
       await this.wait(app, s => s.channel === reference.channel && s.messages.some(m => m.channel === reference.channel && m.ts === reference.ts && m.reactions.some(r => r.name === emoji && r.users.includes(s.user))));
     });

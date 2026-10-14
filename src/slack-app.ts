@@ -40,8 +40,8 @@ export function rendererSnapshot() {
     const c = p.channel || p.conversation;
     if (c && /^D[A-Z0-9]+$/.test(c.id) && c.is_im === true && /^[UW][A-Z0-9]+$/.test(c.user)) peers.set(c.id, {id: c.id, user: c.user});
   });
-  for (const row of rows) props(row, p => {
-    const m = p.message;
+  for (const row of rows) props(row, (p, component) => {
+    const m = p.message || (component === 'Message' ? p.msg : undefined);
     if (!m || !/^\d+\.\d+$/.test(m.ts) || !/^[UW][A-Z0-9]+$/.test(m.user) || typeof m.text !== 'string') return;
     const c = typeof m.channel === 'string' ? m.channel : p.channel?.id || p.channelId || channel;
     if (!/^D[A-Z0-9]+$/.test(c)) return;
@@ -65,7 +65,10 @@ export function rendererAction(action: string, value: string, threadTs?: string,
   if (expectedChannel && channel !== expectedChannel) return false;
   const rowFor = (ts: string) => [...document.querySelectorAll<HTMLElement>('[data-qa="message_container"], [data-qa="virtual-list-item"]')].find(row => {
     let f = (row as any)[Object.keys(row).find(k => k.startsWith('__reactFiber')) || ''];
-    for (let i = 0; f && i < 30; i++, f = f.return) if (f.memoizedProps?.message?.ts === ts) return true;
+    for (let i = 0; f && i < 30; i++, f = f.return) {
+      const component = f.type?.displayName || f.type?.name;
+      if (f.memoizedProps?.message?.ts === ts || component === 'Message' && f.memoizedProps?.msg?.ts === ts) return true;
+    }
     return false;
   });
   if (action === 'focus') {

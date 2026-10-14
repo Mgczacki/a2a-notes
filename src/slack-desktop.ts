@@ -8,7 +8,7 @@ import { readSlackText, DATA_MARKER } from './slack-format.ts';
 import { savePrivate } from './store.ts';
 import { TransportError, type Identity, type Received } from './transport.ts';
 import { DesktopDeliveries } from './slack-desktop-delivery.ts';
-import { NATIVE_FUNCTIONS, type DesktopPost, type NativeResult } from './slack-desktop-native.ts';
+import { NATIVE_FUNCTIONS, type DesktopPost, type DesktopReaction, type NativeResult } from './slack-desktop-native.ts';
 import { decode } from './protocol.ts';
 
 export interface DesktopConfig { url: string; send?: boolean }
@@ -105,6 +105,8 @@ export class SlackDesktopHook {
   private rendererGlobals = new Map<string, string>();
   private nativeLimits: Record<string, number>;
   private nativeLimitsFile: string;
+  private reactionLimits: Record<string, number>;
+  private reactionLimitsFile: string;
   private deliveries: DesktopDeliveries;
   private requests = new Map<number, {socket:WebSocket; resolve:(value:any)=>void; reject:(error:Error)=>void; timer:ReturnType<typeof setTimeout>}>();
   constructor(private options: {
@@ -121,6 +123,10 @@ export class SlackDesktopHook {
     this.nativeLimits = existsSync(this.nativeLimitsFile) ? JSON.parse(readFileSync(this.nativeLimitsFile, 'utf8')) : {};
     if (!this.nativeLimits || Array.isArray(this.nativeLimits) || Object.entries(this.nativeLimits).some(([team, at]) => !/^T[A-Z0-9]+$/.test(team) || !Number.isFinite(at) || at < 0))
       throw new Error('The saved native rate limits could not be checked.');
+    this.reactionLimitsFile = join(options.dir, 'desktop-reaction-limits.json');
+    this.reactionLimits = existsSync(this.reactionLimitsFile) ? JSON.parse(readFileSync(this.reactionLimitsFile, 'utf8')) : {};
+    if (!this.reactionLimits || Array.isArray(this.reactionLimits) || Object.entries(this.reactionLimits).some(([team, at]) => !/^T[A-Z0-9]+$/.test(team) || !Number.isFinite(at) || at < 0))
+      throw new Error('The saved reaction rate limits could not be checked.');
     this.statusValue.sendEnabled = options.config.send === true;
     this.file = join(options.dir, 'desktop-events.json');
     const saved = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : [];
@@ -193,6 +199,29 @@ export class SlackDesktopHook {
       this.deliveries.failed(input.messageId,error instanceof TransportError && error.definite);
       throw error;
     }
+  }
+  async react(input: DesktopReaction) {
+    if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}` || !/^D[A-Z0-9]+$/.test(input.channel) ||
+        !/^\d+\.\d+$/.test(input.ts) || !/^[a-z0-9_+-]{1,64}$/.test(input.name))
+      throw new TransportError('The native receipt reference or account is invalid.', true);
+    try {await (this.options.verifyEndpoint || verifySlackDesktopEndpoint)(this.endpoint);} catch {throw new DesktopUnavailableError();}
+    if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}`)
+      throw new TransportError('The native receipt account changed.', true);
+    const target = [...this.nativeTargets.keys()].find(id => this.verifiedTargets.has(id) && this.sockets.get(id)?.readyState === WebSocket.OPEN);
+    if (this.stopped || !target) throw new DesktopUnavailableError();
+    const limited=this.reactionLimits[input.team]||0;
+    if(limited>Date.now())throw new TransportError('Slack Desktop is waiting after a reactions.add rate limit.',true,Math.ceil((limited-Date.now())/1000),'reactions.add',0);
+    const reply=await this.request(this.sockets.get(target)!, 'Runtime.callFunctionOn', {objectId:this.nativeTargets.get(target),functionDeclaration:NATIVE_FUNCTIONS.react,
+      arguments:[{value:input}],returnByValue:true,awaitPromise:true},25_000);
+    const result=reply.result?.value as NativeResult|undefined;
+    if(result?.ok&&result.channel===input.channel&&result.ts===input.ts)return;
+    const code=typeof result?.error==='string'&&/^[a-z_]{1,80}$/.test(result.error)?result.error:'reaction_failed';
+    if(result?.definite&&code==='native_interface_changed')throw new DesktopUnavailableError();
+    const retryAfter=Number.isFinite(result?.retryAfter)&&result!.retryAfter!>0?result!.retryAfter!:0;
+    if(result?.status===429||code==='ratelimited'){
+      this.reactionLimits[input.team]=Date.now()+Math.max(1,retryAfter||60)*1000;savePrivate(this.reactionLimitsFile,this.reactionLimits);
+    }
+    throw new TransportError(result?.definite?`Slack Desktop: ${code}`:'Slack Desktop receipt is uncertain.',result?.definite===true,retryAfter,'reactions.add',result?.status,result?.requestId);
   }
   private save() { savePrivate(this.file, this.queue); }
   private state() {

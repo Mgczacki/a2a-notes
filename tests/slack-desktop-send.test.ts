@@ -8,7 +8,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DesktopDeliveries } from '../src/slack-desktop-delivery.ts';
-import { nativeFunctions, NATIVE_FUNCTIONS, type DesktopPost } from '../src/slack-desktop-native.ts';
+import { nativeFunctions, NATIVE_FUNCTIONS, type DesktopPost, type DesktopReaction } from '../src/slack-desktop-native.ts';
 import { TransportError } from '../src/transport.ts';
 import { DesktopUnavailableError, SlackDesktopHook } from '../src/slack-desktop.ts';
 import { slackText } from '../src/slack-format.ts';
@@ -25,6 +25,7 @@ function nativeFixture(mode = 'success') {
     if (mode === 'invalid') return Promise.reject({status:200,data:{error:'invalid_auth',token:'private'}});
     if (mode === 'policy') return Promise.reject({status:200,data:{error:6}});
     if (mode === 'lost') return Promise.reject({status:0,message:'private',args:request.args});
+    if (mode === 'already') return Promise.reject({status:200,data:{error:'already_reacted',token:'private'}});
     return Promise.resolve({ok:true,channel:request.args.channel,ts:'100.0001',message:{client_msg_id:request.args.client_msg_id},token:'private'});
   }};
   const original = queue.q;
@@ -43,8 +44,39 @@ function nativeFixture(mode = 'success') {
   // The inspected runtime already has this array after boot.
   context.rspackChunkGantryV2 = [];
   const functions = nativeFunctions(pins);
-  return {calls,context,factories,restored:()=>restored, invoke:(payload:DesktopPost,fn=functions.post)=>runInNewContext(`(${fn})(input)`,{...context,input:payload})};
+  return {calls,context,factories,functions,restored:()=>restored, invoke:(payload:DesktopPost|DesktopReaction,fn=functions.post)=>runInNewContext(`(${fn})(input)`,{...context,input:payload})};
 }
+
+const reaction=():DesktopReaction=>({team:'TEXAMPLE',owner:MARIO,channel:'DTEST',ts:'100.0001',name:'white_check_mark'});
+test('native receipt uses only the saved message reference and one SDK attempt',async()=>{
+  const f=nativeFixture(),p=reaction(),result=await f.invoke(p,f.functions.react);
+  assert.equal(result.ok,true);assert.equal(result.channel,p.channel);assert.equal(result.ts,p.ts);
+  assert.equal(f.calls.length,1);assert.equal(f.calls[0].method,'reactions.add');assert.equal(f.calls[0].attempts,1);
+  assert.equal(f.calls[0].args.timestamp,p.ts);assert.equal(f.calls[0].args.name,p.name);
+  assert.ok(f.restored());assert.ok(!JSON.stringify(result).includes('private'));
+});
+test('native receipt treats an existing own reaction as success',async()=>{
+  const f=nativeFixture('already'),result=await f.invoke(reaction(),f.functions.react);
+  assert.equal(result.ok,true);assert.equal(f.calls.length,1);assert.ok(f.restored());
+});
+test('native receipt honors Retry-After without exposing request data',async()=>{
+  const f=nativeFixture('429'),result=await f.invoke(reaction(),f.functions.react);
+  assert.equal(result.status,429);assert.equal(result.retryAfter,600);assert.equal(result.definite,true);
+  assert.equal(result.requestId,'request-id');assert.equal(f.calls[0].attempts,1);assert.ok(!JSON.stringify(result).includes('private'));
+});
+for(const mode of ['invalid','policy','lost'])test(`native receipt classifies ${mode} without another method`,async()=>{
+  const f=nativeFixture(mode),result=await f.invoke(reaction(),f.functions.react);
+  assert.equal(result.definite,mode!=='lost');assert.equal(f.calls.length,1);assert.equal(f.calls[0].method,'reactions.add');
+  assert.ok(!JSON.stringify(result).includes('private'));
+});
+test('native receipt rejects another account, changed SDK code, and invalid references',async()=>{
+  for(const fields of [{owner:ALEX},{channel:'COTHER'},{ts:'invalid'},{name:'<@UOTHER>'}]){
+    const f=nativeFixture();const result=await f.invoke({...reaction(),...fields},f.functions.react);
+    assert.equal(result.definite,true);assert.equal(f.calls.length,0);
+  }
+  const f=nativeFixture();f.factories.IlU1=function changedFactory(){};
+  assert.equal((await f.invoke(reaction(),f.functions.react)).definite,true);assert.equal(f.calls.length,0);
+});
 
 test('native sending keeps exact text, blocks, and message ID and disables SDK retries', async () => {
   const f=nativeFixture(), p=input(); const result=await f.invoke(p);
@@ -134,8 +166,8 @@ test('native unavailability before posting permits the existing Web API path', a
 async function wait(check:()=>boolean) {
   const end=Date.now()+5000;while(!check()){if(Date.now()>end)assert.fail('Native fixture timed out.');await new Promise(r=>setTimeout(r,20));}
 }
-async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<any>) {
-  let port=0;const clients=new Set<WebSocket>(),posts:DesktopPost[]=[];
+async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<any>,onReact?:(p:DesktopReaction)=>Promise<any>) {
+  let port=0;const clients=new Set<WebSocket>(),posts:DesktopPost[]=[],reactions:DesktopReaction[]=[];
   const server=createServer((_req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify([{id:'native-page',type:'page',url:'https://app.slack.com/client/TEXAMPLE/DTEST',webSocketDebuggerUrl:`ws://127.0.0.1:${port}/devtools/page/native-page`}]));});
   const ws=new WebSocketServer({server});ws.on('connection',client=>{
     clients.add(client);client.on('close',()=>clients.delete(client));
@@ -146,6 +178,7 @@ async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<
       if(m.method==='Runtime.callFunctionOn') {
         let value;
         if(m.params.functionDeclaration===NATIVE_FUNCTIONS.capability)value={ready:true};
+        else if(m.params.functionDeclaration===NATIVE_FUNCTIONS.react){assert.ok(onReact);const p=m.params.arguments[0].value;reactions.push(p);value=await onReact(p);}
         else {assert.equal(m.params.functionDeclaration,NATIVE_FUNCTIONS.post);const p=m.params.arguments[0].value;posts.push(p);value=await onPost(p,client);}
         if(value&&client.readyState===1)client.send(JSON.stringify({id:m.id,result:{result:{value}}}));
       }
@@ -153,8 +186,24 @@ async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<
   });
   await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));port=(server.address() as any).port;
   t.after(async()=>{for(const c of clients)c.terminate();await new Promise<void>(r=>ws.close(()=>server.close(()=>r())));});
-  return {url:`http://127.0.0.1:${port}`,posts,clients};
+  return {url:`http://127.0.0.1:${port}`,posts,reactions,clients};
 }
+
+test('native reaction limits survive restart and do not block message posting',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'native-reaction-429-'));
+  const remote=await nativeCDP(t,async p=>({ok:true,channel:p.channel,ts:'100.0002'}),async()=>({error:'ratelimited',definite:true,status:429,retryAfter:60}));
+  let owner=MARIO;
+  const options={dir,config:{url:remote.url,send:true},identity:()=>({transport:'slack',address:`slack:TEXAMPLE:${owner}`,name:'Mario',scopes:[],missingScopes:[],optionalMissing:[]}),
+    verifyEndpoint:async()=>{},verifyChannel:async()=>false,receive:async()=>{}};
+  let hook=new SlackDesktopHook(options);t.after(()=>hook.close());hook.start();await wait(()=>hook.canSend());
+  await assert.rejects(hook.react(reaction()),e=>e instanceof TransportError&&e.method==='reactions.add'&&e.status===429&&e.retryAfter===60);
+  assert.equal(remote.reactions.length,1);
+  assert.equal((await hook.post(input(),()=>{})).ts,'100.0002');assert.equal(remote.posts.length,1);
+  await hook.close();hook=new SlackDesktopHook(options);hook.start();await wait(()=>hook.canSend());
+  await assert.rejects(hook.react(reaction()),e=>e instanceof TransportError&&e.method==='reactions.add'&&e.status===0&&e.retryAfter>0);
+  assert.equal(remote.reactions.length,1);
+  owner=ALEX;await assert.rejects(hook.react(reaction()),/account is invalid/);assert.equal(remote.reactions.length,1);
+});
 
 test('a cleared renderer context reconnects and verifies native capability before another post',async t=>{
   const remote=await nativeCDP(t,async p=>({ok:true,channel:p.channel,ts:'100.0002'}));

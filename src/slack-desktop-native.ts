@@ -14,6 +14,7 @@ export const NATIVE_PINS = {
 export interface DesktopPost {
   team: string; owner: string; to: string; channel: string; messageId: string; text: string; blocks: string; threadTs?: string;
 }
+export interface DesktopReaction { team: string; owner: string; channel: string; ts: string; name: string }
 export interface NativeResult { ok?: boolean; ready?: boolean; channel?: string; ts?: string; error?: string; definite?: boolean; status?: number; retryAfter?: number; requestId?: string }
 
 // Arguments travel as CDP values. They never become executable source code.
@@ -101,6 +102,50 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
         ...(status===429 || code==='ratelimited' ? {retryAfter:Math.max(1, retryAfter || 60)} : {}), ...(requestId ? {requestId} : {})};
     } finally { clearTimeout(timer); }
   }`;
-  return { capability, post };
+  const react = `async function(input) {
+    'use strict';
+    let enqueued = false, request, timer;
+    try {
+      ${lookup}
+      if (!/^D[A-Z0-9]+$/.test(input.channel) || !/^\\d+\\.\\d+$/.test(input.ts) || !/^[a-z0-9_+-]{1,64}$/.test(input.name))
+        return {error:'native_invalid_payload',definite:true};
+      const original = queue.q, own = Object.getOwnPropertyDescriptor(queue,'q');
+      const controller = new AbortController();
+      timer = setTimeout(() => controller.abort(),15000);
+      let promise;
+      try {
+        queue.q = function(candidate, expedited) {
+          if (candidate.method !== 'reactions.add' || candidate.args?.channel !== input.channel || candidate.args?.timestamp !== input.ts || candidate.args?.name !== input.name)
+            return original.call(this,candidate,expedited);
+          const attempts = Object.getOwnPropertyDescriptor(candidate,'_maxAttempts');
+          if (!attempts?.writable || !Number.isInteger(attempts.value) || candidate._numberOfAttempts !== 0)
+            throw new Error('native_interface_changed');
+          candidate._maxAttempts=1; request=candidate; enqueued=true;
+          return original.call(this,candidate,expedited);
+        };
+        promise=store.dispatch(api({method:'reactions.add',reason:'a2anotes-receipt',timeout:15,abortSignal:controller.signal,
+          args:{channel:input.channel,timestamp:input.ts,name:input.name}}));
+      } finally {if(own)Object.defineProperty(queue,'q',own);else delete queue.q;}
+      const result=await promise;
+      return enqueued && result?.ok===true ? {ok:true,channel:input.channel,ts:input.ts} : {error:'native_delivery_uncertain',definite:false};
+    } catch(error) {
+      if(!enqueued)return {error:error?.message==='native_account_mismatch'?'native_account_mismatch':'native_interface_changed',definite:true};
+      const status=Number(error?.status);
+      const code=typeof error?.data?.error==='string'&&/^[a-z_]{1,80}$/.test(error.data.error)?error.data.error:
+        [6,7,8].includes(error?.data?.error)?'native_receipt_denied':'';
+      if(code==='already_reacted')return {ok:true,channel:input.channel,ts:input.ts};
+      let retryAfter=Math.ceil(Number(error?.retryAfter||0)/1000),requestId;
+      try {
+        const raw=Number(request?._xhr?.getResponseHeader('Retry-After'));
+        if(Number.isFinite(raw)&&raw>0)retryAfter=Math.ceil(raw);
+        const id=request?._xhr?.getResponseHeader('x-slack-req-id');
+        if(typeof id==='string'&&/^[a-zA-Z0-9_-]{1,100}$/.test(id))requestId=id;
+      }catch{}
+      const definite=status===429||status>=400&&status<500||!!code&&!['internal_error','fatal_error','_parse_error'].includes(code);
+      return {error:code||'native_delivery_uncertain',definite,...(status>=100&&status<=599?{status}:{}),
+        ...(status===429||code==='ratelimited'?{retryAfter:Math.max(1,retryAfter||60)}:{}),...(requestId?{requestId}:{})};
+    }finally{clearTimeout(timer);}
+  }`;
+  return { capability, post, react };
 }
 export const NATIVE_FUNCTIONS = nativeFunctions();

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.3
+
+- Read current Slack Message records from their `msg` field.
+- Match receipt and thread controls against the same message records.
+- Confirm receipt through the verified app SDK when native sending is selected.
+- Give receipt requests one SDK attempt and preserve their method limit across restart.
+- Keep receipt confirmation separate from acceptance and action approval.
+
 ## 0.11.2
 
 - Queue the same approved note after a verified app failure before posting.

@@ -306,6 +306,17 @@ test('a reaction from another account does not acknowledge for the recipient', a
   const f=fixture(); await f.transport.connect(); f.s.messages.push({...structuredClone(message),reactions:[{name:'white_check_mark',users:['UALEX01']}]});
   await f.transport.acknowledge({channel:message.channel,ts:message.ts}); assert.equal(f.calls.filter(c => c.startsWith('react:')).length,1);
 });
+test('native receipt uses the verified original timestamp without composer controls',async()=>{
+  const f=fixture();await f.transport.connect();f.s.messages.push(structuredClone(message));let calls=0;
+  f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new Error('No message post permitted');},react:async(input)=>{
+    calls++;assert.equal(input.ts,message.ts);assert.equal(input.channel,message.channel);assert.equal(input.owner,f.s.user);
+  }};
+  await f.transport.acknowledge({channel:message.channel,ts:message.ts});
+  assert.equal(calls,1);assert.deepEqual(f.calls,[]);
+  f.transport.desktopSender.react=async()=>{throw new TransportError('rate limited',true,60,'reactions.add',429);};
+  await assert.rejects(f.transport.acknowledge({channel:message.channel,ts:message.ts}),(e:any)=>e.method==='reactions.add'&&e.status===429);
+  assert.deepEqual(f.calls,[]);
+});
 test('text send saves its checkpoint before clicking and confirms the original message ID', async () => {
   const f=fixture(); await f.transport.connect(); let checkpoint:any;
   f.app.submit=async () => {assert.equal(checkpoint.postStarted,true); f.calls.push('submit'); f.s.messages.push({channel:f.s.channel!,user:f.s.user,text:f.s.draft,ts:'1791935000.002',reactions:[]});f.s.draft='';};
@@ -350,6 +361,23 @@ test('renderer copies known message and profile fields without exposing unrelate
   const element={__reactFiberTest:{memoizedProps:{message:{...message,access:'secret'},channel:{id:'DOTHER01',is_im:true,user:'UALEX01'},user:{id:'UALEX01',name:'Alex',profile:{token:'secret'}}}}};
   const result=runInNewContext(`(${rendererSnapshot.toString()})()`,{__name:(f:unknown)=>f,location:{pathname:'/client/TEXAMPLE/DOTHER01'},document:{querySelector:()=>null,querySelectorAll:(q:string)=>q.includes('contenteditable')?[]:[element]}});
   assert.equal(result.messages.length,1); assert.equal(result.peers[0].user,'UALEX01'); assert.ok(!JSON.stringify(result).includes('secret'));
+});
+test('the live Message component supplies msg records with bounded fields',()=>{
+  const record={...message,thread_ts:'1791934800.001',reactions:[{name:'white_check_mark',users:['UMARIO01'],private:'secret'}],__meta__:{access:'secret'}};
+  const row={__reactFiberTest:{type:{displayName:'Message'},memoizedProps:{msg:record,channelId:'DOTHER01',private:'secret'}}};
+  const unrelated={__reactFiberTest:{type:{displayName:'Unrelated'},memoizedProps:{msg:{...record,ts:'1791934900.009'}}}};
+  const otherChannel={__reactFiberTest:{type:{displayName:'Message'},memoizedProps:{msg:{...record,channel:'COTHER01',ts:'1791934900.010'}}}};
+  const result=runInNewContext(`(${rendererSnapshot.toString()})()`,{__name:(f:unknown)=>f,location:{pathname:'/client/TEXAMPLE/DOTHER01'},document:{querySelector:()=>null,querySelectorAll:(q:string)=>q.includes('contenteditable')?[]:[row,unrelated,otherChannel]}});
+  assert.equal(result.messages.length,1);assert.equal(result.messages[0].ts,message.ts);assert.equal(result.messages[0].user,message.user);
+  assert.equal(result.messages[0].text,message.text);assert.equal(result.messages[0].thread_ts,record.thread_ts);
+  assert.equal(result.messages[0].reactions[0].users[0],'UMARIO01');assert.ok(!JSON.stringify(result).includes('secret'));
+});
+test('reaction controls match the saved timestamp in current Message props',()=>{
+  let clicks=0;
+  const row={__reactFiberTest:{type:{displayName:'Message'},memoizedProps:{msg:message}},dispatchEvent:()=>{},querySelector:()=>({click:()=>{clicks++;}})};
+  const run=(ts:string)=>runInNewContext(`(${rendererAction.toString()})('reaction',${JSON.stringify(ts)},undefined,'DOTHER01')`,{__name:(f:unknown)=>f,MouseEvent:class{},location:{pathname:'/client/TEXAMPLE/DOTHER01'},document:{querySelectorAll:()=>[row]}});
+  assert.equal(run('1791934900.009'),false);assert.equal(clicks,0);
+  assert.equal(run(message.ts),true);assert.equal(clicks,1);
 });
 test('submit refuses a changed channel before it clicks a control', () => {
   const result=runInNewContext(`(${rendererAction.toString()})('submit','',undefined,'DOTHER01','approved text')`,{location:{pathname:'/client/TEXAMPLE/DWRONG01'},document:{querySelectorAll:()=>{throw new Error('No control may be read');}}});
