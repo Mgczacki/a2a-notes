@@ -196,6 +196,7 @@ The adapter sends only the checked bytes to that Slack URL, without a cookie or 
 It then shares the file through the app's native client.
 Slack shows the file as an attachment, with a 2 MiB adapter limit per file.
 The adapter checks the original sender and message reference before it returns file bytes through the app.
+It reads attachment metadata with `files.info` before download.
 The protocol still checks each attachment hash.
 A complete app message must fit within 39,000 bytes.
 Draft creation, revision, and approval check these limits before posting.

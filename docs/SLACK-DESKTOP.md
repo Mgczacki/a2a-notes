@@ -35,6 +35,14 @@ The adapter checks the direct message conversation with `conversations.info`.
 Ordinary text supplies no instruction or approval.
 Recovery reads the 50 latest records of up to 20 direct conversations with `conversations.history`.
 Recovery does not provide a complete history export.
+The app client permits these read methods:
+
+- `conversations.info`
+- `conversations.open`
+- `conversations.history`
+- `users.info`
+- `users.list`
+- `files.info`
 
 ## Send and acknowledge
 
