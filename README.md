@@ -181,16 +181,20 @@ It reads Slack records through the app's own API client in the background.
 It never changes the open conversation, types in the composer, or clicks a Slack control.
 It confirms the recipient with `conversations.open` and `users.info`.
 
-The adapter saves `postStarted` before it calls `chat.postMessage`.
-Slack must return the matching channel and timestamp before delivery becomes `sent`.
+The adapter saves `postStarted` before it posts text through `chat.postMessage`.
+For a note with files, it saves `postStarted` before `files.completeUploadExternal` shares the files and note text.
+Slack must show the matching message ID and files before delivery becomes `sent`.
 After an uncertain post, the adapter searches recent conversation records for that message ID.
 It never repeats an uncertain post.
 
 The service retains its retry deadlines and attempt limit.
-The app transport does not use HTTP status codes or Slack method quotas.
+The adapter handles Slack method limits and HTTP errors from the signed file upload URL.
 Existing queue records remain readable.
 Agent request data travels inline in the original message, with a 26,000-byte limit.
-Supporting files use the signed-in app's file control. Slack shows them as file attachments, with a 2 MiB limit per file.
+The signed-in app grants each supporting file an upload URL.
+The adapter sends only the checked bytes to that Slack URL, without a cookie or token.
+It then shares the file through the app's native client.
+Slack shows the file as an attachment, with a 2 MiB adapter limit per file.
 The adapter checks the original sender and message reference before it returns file bytes through the app.
 The protocol still checks each attachment hash.
 A complete app message must fit within 39,000 bytes.

@@ -56,8 +56,8 @@ async function stoppedNote(t: any, withFile = false) {
   return {...f,service,d,attachment:file};
 }
 
-test('an approved pre-post failure retries once after restart with the same note, files, and approval', async t => {
-  const f = await stoppedNote(t,true), request_id = randomUUID();
+test('an approved pre-post failure retries once after restart with the same note and approval', async t => {
+  const f = await stoppedNote(t), request_id = randomUUID();
   const before = structuredClone(f.service.store.note(f.d.id)!);
   const queued = await f.service.retrySend(person,{id:f.d.id,expected_hash:f.d.hash,request_id});
   assert.equal(queued.state,'queued'); assert.equal(queued.message_id,f.d.message_id);
@@ -68,7 +68,7 @@ test('an approved pre-post failure retries once after restart with the same note
   const transport = new SlackTransport(f.file,{teamId:f.s.team},undefined,{open:async()=>f.app});
   await transport.connect(); let posts=0;
   transport.desktopSender={canSend:()=>true,post:async(input,dispatch)=>{dispatch();posts++;assert.equal(input.messageId,f.d.message_id);
-    assert.match(input.text,/Approved attachment|QXBwcm92ZWQgYXR0YWNobWVudA==/);return {channel:input.channel,ts:'1791935000.020'};}};
+    assert.match(input.text,/Please read the plan/);return {channel:input.channel,ts:'1791935000.020'};}};
   const service = new NotesService({store:new Store(join(f.file,'..')),transport,scanIntervalMs:0,retryIntervalMs:0});
   t.after(()=>service.stop());
   await service.retrySend(person,{id:f.d.id,expected_hash:f.d.hash,request_id});
@@ -96,7 +96,7 @@ test('retry requests serialize while saved native attempts are checked', async t
 });
 
 test('a lost response after an approved retry recovers its receipt after restart without another post',async t=>{
-  const f=await stoppedNote(t,true);let posts=0;
+  const f=await stoppedNote(t);let posts=0;
   const deliveries=new DesktopDeliveries(join(f.file,'..'));
   f.transport.desktopSender={canSend:()=>true,post:async(input,before)=>{
     before();posts++;deliveries.begin(input);deliveries.confirmed(input.messageId,input.channel,'1791935000.023');
@@ -112,7 +112,7 @@ test('a lost response after an approved retry recovers its receipt after restart
   t.after(()=>service.stop());await service.processQueue();
   const n=service.store.note(f.d.id)!;
   assert.equal(n.state,'sent');assert.equal(n.transport!.ts,'1791935000.023');assert.equal(posts,1);
-  assert.match(n.transport!.files![f.attachment!.file_id],/^APP[a-f0-9]{64}$/);
+  assert.deepEqual(n.transport!.files,{});
   assert.ok(!f.calls.includes('submit'));
 });
 
@@ -228,18 +228,17 @@ test('native app posting queues a 429 under the same approval without using comp
   } finally {await service.stop();}
 });
 
-test('native app receipt survives restart and keeps inline files without another post or navigation', async () => {
-  const f=fixture();await f.transport.connect(); const id=randomUUID(),bytes=Buffer.from('Attached text');let checkpoint:any,posts=0;
+test('native app receipt survives restart without another post or navigation', async () => {
+  const f=fixture();await f.transport.connect(); const id=randomUUID();let checkpoint:any,posts=0;
   const deliveries=new DesktopDeliveries(join(f.file,'..'));
   f.transport.desktopSender={canSend:()=>true,post:async (input,before)=>{
     before();posts++;deliveries.begin(input);deliveries.confirmed(input.messageId,input.channel,'1791935000.010');
     throw new TransportError('Lost response',false);
   }};
-  const input={to:'slack:TEXAMPLE:UALEX01',messageId:id,display:{subject:'Read the attachment',body:'Please read.',audience:'person' as const,senderName:'Mario',files:[{name:'text.txt',size:bytes.length}]},
-    files:[{id:'file',name:'text.txt',bytes}],wire:(map:Record<string,string>)=>`A2ANotes/1\nID: ${id}\nTransport-File-Slack: file | ${map.file}`,saveCheckpoint:(c:any)=>{checkpoint=structuredClone(c);}};
+  const input={to:'slack:TEXAMPLE:UALEX01',messageId:id,display:{subject:'Read the note',body:'Please read.',audience:'person' as const,senderName:'Mario',files:[]},
+    files:[],wire:()=>`A2ANotes/1\nID: ${id}\nBody: Please read.`,saveCheckpoint:(c:any)=>{checkpoint=structuredClone(c);}};
   await assert.rejects(f.transport.send(input),/Lost response/);
-  assert.equal(checkpoint.postStarted,true);assert.equal(checkpoint.uploads.file.phase,'complete');
-  assert.match(checkpoint.uploads.file.fileId,/^APP[a-f0-9]{64}$/);
+  assert.equal(checkpoint.postStarted,true);assert.deepEqual(checkpoint.uploads,{});
   const restarted=new SlackTransport(f.file,{teamId:f.s.team},undefined,{open:async()=>f.app});
   f.calls.length=0;
   assert.equal((await restarted.findSent(input.to,id))?.ts,'1791935000.010');
@@ -281,7 +280,7 @@ test('API upload progress cannot become a second attachment through the app adap
   f.transport.desktopSender={canSend:()=>true,post:async()=>{native++;throw new Error('No native call is permitted');}};
   await assert.rejects(f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:randomUUID(),
     display:{subject:'Plan',body:'Please read.',audience:'person',senderName:'Mario',files:[]},files:[],wire:()=>'',
-    checkpoint:{channel:'DOTHER01',uploads:{file:{fileId:'FOLD01',url:'https://files.slack.com/old',phase:'complete'}}}}),/earlier Slack adapter/);
+    checkpoint:{channel:'DOTHER01',uploads:{file:{fileId:'FOLD01',url:'https://files.slack.com/old',phase:'complete'}}}}),/reconciliation/);
   assert.equal(native,0);assert.deepEqual(f.calls,[]);
 });
 
@@ -355,7 +354,7 @@ test('text send saves its checkpoint before posting and confirms the original me
 });
 test('oversized attachments fail before posting', async () => {
   const f=fixture(); await f.transport.connect(); const input={to:'slack:TEXAMPLE:UALEX01',messageId:'123',display:{subject:'Plan',body:'Text',audience:'person' as const,senderName:'Mario',files:[]},files:[],wire:()=> 'A2ANotes/1\nID: 123'};
-  await assert.rejects(f.transport.send({...input,files:[{id:'x',name:'x.txt',bytes:Buffer.alloc(40_000)}]}),/exceed the app text limit/);
+  await assert.rejects(f.transport.send({...input,files:[{id:'x',name:'x.txt',bytes:Buffer.alloc(2*1024*1024+1)}]}),/2 MiB/);
   assert.deepEqual(f.calls,[]);
 });
 test('lost post response can be reconciled without another post', async () => {
@@ -396,15 +395,68 @@ test('an unavailable app keeps the bound identity and retries without sending', 
   assert.equal(next.identity()?.address,'slack:TEXAMPLE:UMARIO01'); assert.equal(next.identity()?.available,false);
 });
 
-test('small attachments remain in the original message and verify sender, size, and hash', async () => {
-  const f=fixture(); await f.transport.connect(); const bytes=Buffer.from('A small JSON request.');
-  const result=await f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:'123',display:{subject:'Plan',body:'Text',audience:'person',senderName:'Mario',files:[{name:'request.json',size:bytes.length}]},files:[{id:'file',name:'request.json',bytes}],wire:map=>`A2ANotes/1\nID: 123\nTransport-File-Slack: file | ${map.file}`});
+test('a Markdown file posts as a visible Slack attachment and downloads with its original hash', async () => {
+  const f=fixture(); await f.transport.connect(); const bytes=Buffer.from('# Report\n'+('Content.\n'.repeat(4000)));
+  const id=randomUUID(),fileId='FREPORT01';
+  let uploads=0,completions=0,posts=0;
+  f.app.downloadFile=async()=>bytes;
+  f.transport.desktopSender={canSend:()=>true,canRead:()=>true,
+    post:async()=>{posts++;throw new Error('A file note must use the file share path.');},
+    read:async input=>({file:{id:fileId,name:'report.md',size:bytes.length,url:'https://files.slack.com/files-pri/test'}}),
+    uploadFile:async(input,saveTicket)=>{uploads++;assert.deepEqual(input.bytes,bytes);saveTicket(fileId);return fileId;},
+    completeFile:async input=>{
+      completions++;assert.equal(input.channel,'DOTHER01');assert.equal(input.messageId,id);
+      assert.match(input.text!,/A2A Notes data: /);
+      assert.deepEqual(input.files,[{id:fileId,title:'report.md'}]);
+      f.s.messages.push({channel:'DOTHER01',user:'UMARIO01',text:input.text!,ts:'1791935000.010',subtype:'file_share',
+        files:[{id:fileId,name:'report.md',size:bytes.length}],reactions:[]});
+      return {ok:true};
+    }};
+  const result=await f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:id,
+    display:{subject:'Report',body:'Please read.',audience:'person',senderName:'Mario',files:[{name:'report.md',size:bytes.length}]},
+    files:[{id:'file',name:'report.md',bytes}],wire:map=>`A2ANotes/1\nID: ${id}\nTransport-File-Slack: file | ${map.file}`});
+  assert.equal(result.ts,'1791935000.010');assert.equal(uploads,1);assert.equal(completions,1);assert.equal(posts,0);
   const received={conversation:'slack:TEXAMPLE:DOTHER01',ref:`slack:TEXAMPLE:DOTHER01:${result.ts}`,channel:'DOTHER01',ts:result.ts,sender:'slack:TEXAMPLE:UMARIO01',text:''};
-  assert.deepEqual(await f.transport.download(result.files.file,received,100),bytes);
-  await assert.rejects(f.transport.download(result.files.file,{...received,sender:'slack:TEXAMPLE:UALEX01'},100),/original attachment/);
+  assert.deepEqual(await f.transport.download(result.files.file,received,bytes.length),bytes);
+  await assert.rejects(f.transport.download(result.files.file,{...received,sender:'slack:TEXAMPLE:UALEX01'},bytes.length),/original attachment/);
   await assert.rejects(f.transport.download(result.files.file,received,2),/bytes do not match/);
-  f.s.messages[0].text=f.s.messages[0].text.replace(bytes.toString('base64'),Buffer.from('Changed bytes').toString('base64'));
-  await assert.rejects(f.transport.download(result.files.file,received,100),/bytes do not match/);
+  f.app.downloadFile=async()=>Buffer.from('Wrong bytes');
+  await assert.rejects(f.transport.download(result.files.file,received,bytes.length),/bytes do not match/);
+});
+
+test('a lost binary upload starts a new ticket before any file share',async()=>{
+  const f=fixture();await f.transport.connect();let saved:any,tickets=0,completions=0;
+  const id=randomUUID(),bytes=Buffer.from('# Report\nText.');
+  const input={to:'slack:TEXAMPLE:UALEX01',messageId:id,
+    display:{subject:'Report',body:'Please read.',audience:'person' as const,senderName:'Mario',files:[{name:'report.md',size:bytes.length}]},
+    files:[{id:'file',name:'report.md',bytes}],wire:()=>`A2ANotes/1\nID: ${id}\nBody: Please read.`,
+    saveCheckpoint:(value:any)=>{saved=structuredClone(value);}};
+  f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new Error('No text post');},
+    uploadFile:async(_input,saveTicket)=>{tickets++;saveTicket(`FNEW0${tickets}`);if(tickets===1)throw new TransportError('Lost upload reply',false);return 'FNEW02';},
+    completeFile:async data=>{completions++;f.s.messages.push({channel:'DOTHER01',user:'UMARIO01',text:data.text!,ts:'1791935000.011',
+      subtype:'file_share',files:[{id:'FNEW02',name:'report.md',size:bytes.length}],reactions:[]});return {ok:true};}};
+  await assert.rejects(f.transport.send(input),/Lost upload reply/);
+  assert.equal(saved.postStarted,undefined);assert.equal(saved.uploads.file.phase,'allocated');assert.equal(saved.uploads.file.url,undefined);
+  const result=await f.transport.send({...input,checkpoint:saved});
+  assert.equal(result.ts,'1791935000.011');assert.equal(tickets,2);assert.equal(completions,1);
+});
+
+test('an uncertain file completion finds its message and never completes twice',async()=>{
+  const f=fixture();await f.transport.connect();let saved:any,completions=0;
+  const id=randomUUID(),bytes=Buffer.from('# Report\nText.');
+  const input={to:'slack:TEXAMPLE:UALEX01',messageId:id,
+    display:{subject:'Report',body:'Please read.',audience:'person' as const,senderName:'Mario',files:[{name:'report.md',size:bytes.length}]},
+    files:[{id:'file',name:'report.md',bytes}],wire:()=>`A2ANotes/1\nID: ${id}\nBody: Please read.`,
+    saveCheckpoint:(value:any)=>{saved=structuredClone(value);}};
+  f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new Error('No text post');},
+    uploadFile:async(_input,saveTicket)=>{saveTicket('FNEW01');return 'FNEW01';},
+    completeFile:async data=>{completions++;f.s.messages.push({channel:'DOTHER01',user:'UMARIO01',text:data.text!,ts:'1791935000.012',
+      subtype:'file_share',files:[{id:'FNEW01',name:'report.md',size:bytes.length}],reactions:[]});throw new TransportError('Lost completion reply',false);}};
+  await assert.rejects(f.transport.send(input),/Lost completion reply/);
+  assert.equal(saved.postStarted,true);assert.equal(saved.uploads.file.phase,'completing');
+  assert.equal((await f.transport.findSent(input.to,id,undefined,{save:()=>{},expectedFiles:[{name:'report.md',size:bytes.length}]}))?.ts,'1791935000.012');
+  await assert.rejects(f.transport.send({...input,checkpoint:saved}),/reconciled/);
+  assert.equal(completions,1);
 });
 
 test('an approved agent note with its JSON file reaches another app account through the protocol core', async () => {

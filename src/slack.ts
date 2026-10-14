@@ -14,6 +14,8 @@ export const REQUIRED_SCOPES: string[] = [];
 // Each recovery scan reads at most this many direct conversations.
 const MAX_SCAN_CONVERSATIONS = 20;
 export const OPTIONAL_SCOPES: string[] = [];
+export const MAX_APP_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+export const MAX_INLINE_ATTACHMENT_BYTES = 26_000;
 export interface SlackConfig {
   teamId: string; desktopUrl?: string; acknowledgementEmoji?: string; allowSelf?: boolean; projectLink?: string;
   // Old settings remain readable for rollback. The app transport ignores them.
@@ -30,7 +32,7 @@ export function parseSlackAddress(address: string) {
 }
 interface Binding {team: string; user: string; name: string}
 export class SlackTransport implements Transport {
-  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'> & Partial<Pick<SlackDesktopHook, 'status' | 'react' | 'notice' | 'read' | 'canRead'>>;
+  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'> & Partial<Pick<SlackDesktopHook, 'status' | 'react' | 'notice' | 'read' | 'canRead' | 'uploadFile' | 'completeFile'>>;
   readonly name = 'slack'; readonly fileField = 'Slack';
   private binding?: Binding;
   private verified = false;
@@ -151,78 +153,111 @@ export class SlackTransport implements Transport {
   async verifyRetry(to: string, messageId: string, checkpoint: SendCheckpoint) {
     const {team} = parseSlackAddress(to);
     if (team !== this.config.teamId || checkpoint.postStarted || !/^D[A-Z0-9]+$/.test(checkpoint.channel || '') ||
-        Object.values(checkpoint.uploads).some(u => u.phase !== 'complete' || !/^APP[a-f0-9]{64}$/.test(u.fileId)))
+        Object.values(checkpoint.uploads).some(u => u.phase === 'completing' ||
+          !(u.phase === 'complete' && /^APP[a-f0-9]{64}$/.test(u.fileId) ||
+            ['allocated','uploaded'].includes(u.phase) && /^F[A-Z0-9]+$/.test(u.fileId))))
       throw new TransportError('Saved post or file progress does not permit this retry.', true);
     await this.run(async (_app, s) => {
       new DesktopDeliveries(dirname(this.file)).verifyRetry(s.team, s.user, to, messageId, checkpoint.channel!);
     });
   }
+  private formatSend(input: SendInput) {
+    const inline = input.display.agentFile ? input.files.slice(0,1) : [];
+    const support = input.files.slice(inline.length);
+    if (inline.reduce((size,f)=>size+f.bytes.length,0)>MAX_INLINE_ATTACHMENT_BYTES)
+      throw new TransportError(`Agent request data exceeds the ${MAX_INLINE_ATTACHMENT_BYTES}-byte inline limit.`,true);
+    for (const f of support) if (f.bytes.length<1 || f.bytes.length>MAX_APP_ATTACHMENT_BYTES)
+      throw new TransportError('A Slack attachment must be between 1 byte and 2 MiB.',true);
+    const files=Object.fromEntries(input.files.map(f=>[f.id,'APP'+createHash('sha256').update(f.bytes).digest('hex')]));
+    const attachments=inline.map(f=>({ref:files[f.id],name:f.name,base64:f.bytes.toString('base64')}));
+    const literal=(value:string)=>value.replace(/@/g,'@\u200b');
+    const data=JSON.stringify(input.wire(files)).replace(/@/g,'\\u0040').replace(/</g,'\\u003c').replace(/>/g,'\\u003e').replace(/&/g,'\\u0026')
+      .replace(/[\u007f-\uffff]/g,character=>`\\u${character.charCodeAt(0).toString(16).padStart(4,'0')}`);
+    const attachmentText=attachments.length ? `A2A Notes attachments: ${JSON.stringify(attachments)}\n` : '';
+    const text=`A2A Notes: ${literal(input.display.subject)}\nFrom ${literal(input.display.senderName)}\n\n${literal(input.display.body)}\n\nReply with A2A Reply/1 ${input.messageId} on the first line.\nA reply does not approve actions. The acknowledgement reaction means received.\n${attachmentText}${DATA_MARKER}${data}`;
+    if(Buffer.byteLength(text)>MAX_SLACK_TEXT)throw new TransportError(`The app message exceeds ${MAX_SLACK_TEXT} bytes. Shorten the note before approval.`,true);
+    return {files,inline,support,text};
+  }
+  checkDraft(input: SendInput) {this.formatSend(input);}
   async send(input: SendInput) {
-    if (Object.values(input.checkpoint?.uploads || {}).some(upload => !/^APP[a-f0-9]{64}$/.test(upload.fileId)))
-      throw new TransportError('Saved file progress requires the earlier Slack adapter. No new message was posted.', true);
-    if (input.files.reduce((size, f) => size + f.bytes.length, 0) > 26_000) throw new TransportError('The encoded attachments exceed the app text limit. No message was posted.', true);
-    const files = Object.fromEntries(input.files.map(f => [f.id, 'APP' + createHash('sha256').update(f.bytes).digest('hex')]));
-    const attachments = input.files.map(f => ({ref:files[f.id], name:f.name, base64:f.bytes.toString('base64')}));
-    const {team, user} = parseSlackAddress(input.to);
-    if (team !== this.config.teamId) throw new TransportError('Choose a recipient in the configured workspace.', true);
-    // JSON escapes preserve the exact wire text without creating active mention text.
-    const literal = (value: string) => value.replace(/@/g, '@\u200b');
-    const data = JSON.stringify(input.wire(files)).replace(/@/g, '\\u0040').replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
-    const attachmentText = attachments.length ? `A2A Notes attachments: ${JSON.stringify(attachments).replace(/@/g, '\\u0040').replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')}\n` : '';
-    const text = `A2A Notes: ${literal(input.display.subject)}\nFrom ${literal(input.display.senderName)}\n\n${literal(input.display.body)}\n\nReply with A2A Reply/1 ${input.messageId} on the first line.\nA reply does not approve actions. ✅ means received.\n${attachmentText}${DATA_MARKER}${data}`;
-    if (Buffer.byteLength(text) > MAX_SLACK_TEXT) throw new TransportError('The message and encoded attachments exceed the app text limit. No message was posted.', true);
-    return this.run(async (app, s) => {
-      if (user === s.user && !this.config.allowSelf) throw new TransportError('Choose another workspace member.', true);
-      const notReady = () => new TransportError('Slack native sending is not ready. No post was started.', true, 0, 'slack.desktop', undefined, undefined, 'app_control_unavailable');
-      const checkpoint = input.checkpoint || {uploads: {}};
-      // A saved checkpoint lets a lost read before posting return to the queue instead of becoming uncertain.
+    if(input.checkpoint?.postStarted)throw new TransportError('The earlier post must be reconciled before another send.',true);
+    if(Object.values(input.checkpoint?.uploads||{}).some(u=>u.phase==='completing'||
+      !(u.phase==='complete'&&/^APP[a-f0-9]{64}$/.test(u.fileId)||
+        ['allocated','uploaded'].includes(u.phase)&&/^F[A-Z0-9]+$/.test(u.fileId))))
+      throw new TransportError('Saved file progress requires reconciliation before another send.',true);
+    const {files,inline,support,text}=this.formatSend(input);
+    const {team,user}=parseSlackAddress(input.to);
+    if(team!==this.config.teamId)throw new TransportError('Choose a recipient in the configured workspace.',true);
+    return this.run(async(app,s)=>{
+      if(user===s.user&&!this.config.allowSelf)throw new TransportError('Choose another workspace member.',true);
+      const checkpoint=input.checkpoint||{uploads:{}};
       input.saveCheckpoint?.(checkpoint);
-      const view = await this.view(app, user); this.person(view, user);
-      const generation = this.generation;
-      const channel = view.channel!;
-      if (checkpoint.channel && checkpoint.channel !== channel) throw new TransportError('The saved DM differs from the app DM.', true);
-      checkpoint.channel = channel;
-      for (const f of input.files) checkpoint.uploads[f.id] = {fileId:files[f.id], url:'slack-app:inline', phase:'complete'};
+      const view=await this.view(app,user);this.person(view,user);
+      const channel=view.channel!;
+      if(checkpoint.channel&&checkpoint.channel!==channel)throw new TransportError('The saved DM differs from the app DM.',true);
+      checkpoint.channel=channel;
+      for(const f of inline)checkpoint.uploads[f.id]={fileId:files[f.id],phase:'complete'};
       input.saveCheckpoint?.(checkpoint);
-      // The saved conversation lets a2anotes_retry_send queue the same note after the setting changes.
-      if (!this.desktopSender || this.desktopSender.status?.().sendEnabled === false)
-        throw new TransportError('Slack Desktop native sending is turned off. Run a2a-notes desktop enable with --send. No post was started.', true,
-          0, 'slack.desktop', undefined, undefined, 'app_control_unavailable');
-      const sender = this.desktopSender;
-      try { await this.wait(app, s => s.channel === channel && sender.canSend()); }
-      catch (error) {
-        if (error instanceof TransportError && !error.definite) throw notReady();
-        throw error;
-      }
-      if (sender.canSend() !== true) throw notReady();
-      {
-        checkpoint.postTransport = 'desktop';
-        try {
-          const receipt = await sender.post({team:s.team, owner:s.user, to:input.to, channel,
-            messageId:input.messageId, text, blocks:JSON.stringify(slackBlocks(input.display, {projectLink:this.config.projectLink})),
-            ...(input.threadTs ? {threadTs:input.threadTs} : {})}, () => {
-              if (this.disabled || this.generation !== generation || this.binding?.team !== s.team || this.binding?.user !== s.user)
-                throw new TransportError('The Slack app account changed before posting.', true);
-              checkpoint.postStarted = true; input.saveCheckpoint?.(checkpoint);
-            });
-          return {...receipt,files};
-        } catch (error) {
-          if (error instanceof TransportError && error.definite && checkpoint.postStarted) {checkpoint.postStarted=false;input.saveCheckpoint?.(checkpoint);}
-          if (error instanceof DesktopUnavailableError) throw notReady();
-          throw error;
+      const sender=this.desktopSender;
+      const notReady=()=>new TransportError('Slack native sending is not ready. No post was started.',true,0,'slack.desktop',undefined,undefined,'app_control_unavailable');
+      if(!sender||sender.status?.().sendEnabled===false)
+        throw new TransportError('Slack Desktop native sending is turned off. No post was started.',true,0,'slack.desktop',undefined,undefined,'app_control_unavailable');
+      try {await this.ready(()=>sender.canSend(),'No post was started.');}
+      catch{throw notReady();}
+      if(!sender.canSend())throw notReady();
+      if(support.length){
+        if(!sender.uploadFile||!sender.completeFile)throw notReady();
+        const uploaded:{id:string;title:string}[]=[];
+        for(const f of support){
+          const fileId=await sender.uploadFile({team:s.team,owner:s.user,name:f.name,bytes:f.bytes},id=>{
+            checkpoint.uploads[f.id]={fileId:id,phase:'allocated'};input.saveCheckpoint?.(checkpoint);
+          });
+          checkpoint.uploads[f.id].phase='uploaded';input.saveCheckpoint?.(checkpoint);
+          uploaded.push({id:fileId,title:f.name});
         }
+        if(this.disabled||this.binding?.team!==s.team||this.binding?.user!==s.user)
+          throw new TransportError('The Slack app account changed before posting.',true);
+        if(checkpoint.channel!==channel||support.some((f,i)=>checkpoint.uploads[f.id]?.fileId!==uploaded[i]?.id))
+          throw new TransportError('The saved file IDs or direct conversation changed before posting.',true);
+        checkpoint.postTransport='desktop';checkpoint.postStarted=true;
+        for(const f of support)checkpoint.uploads[f.id].phase='completing';
+        input.saveCheckpoint?.(checkpoint);
+        await sender.completeFile({team:s.team,owner:s.user,channel,messageId:input.messageId,text,files:uploaded,
+          ...(input.threadTs?{threadTs:input.threadTs}:{})});
+        for(const f of support)checkpoint.uploads[f.id].phase='complete';input.saveCheckpoint?.(checkpoint);
+        for(let attempt=0;attempt<10;attempt++){
+          await app.navigate(channel);
+          const latest=await app.snapshot();
+          const m=latest.messages.find(m=>m.channel===channel&&m.user===s.user&&this.messageId(m.text)===input.messageId&&
+            support.every(f=>m.files?.some(found=>found.id===checkpoint.uploads[f.id].fileId&&found.name===f.name&&found.size===f.bytes.length)));
+          if(m)return {channel,ts:m.ts,files};
+          await new Promise(resolve=>setTimeout(resolve,300));
+        }
+        throw new TransportError('Slack has not confirmed the file share message. No duplicate was posted.',false);
+      }
+      checkpoint.postTransport='desktop';
+      try {
+        const receipt=await sender.post({team:s.team,owner:s.user,to:input.to,channel,messageId:input.messageId,text,
+          blocks:JSON.stringify(slackBlocks(input.display,{projectLink:this.config.projectLink})),
+          ...(input.threadTs?{threadTs:input.threadTs}:{})},()=>{checkpoint.postStarted=true;input.saveCheckpoint?.(checkpoint);});
+        return {...receipt,files};
+      }catch(error){
+        if(error instanceof TransportError&&error.definite&&checkpoint.postStarted){checkpoint.postStarted=false;input.saveCheckpoint?.(checkpoint);}
+        if(error instanceof DesktopUnavailableError)throw notReady();
+        throw error;
       }
     });
   }
   private messageId(text: string) {const read = readSlackText(text); return 'text' in read ? /^ID: (.+)$/m.exec(read.text)?.[1] : undefined;}
-  async findSent(to: string, id: string) {
+  async findSent(to: string, id: string, _since?: string, progress?: {cursor?: string; save:(cursor?: string)=>void; expectedFiles?: {name:string;size:number}[]}) {
     const {team, user} = parseSlackAddress(to);
     if (team !== this.config.teamId) throw new TransportError('The saved recipient belongs to another workspace.', true);
     return this.run(async (app, snapshot) => {
       const receipt = new DesktopDeliveries(dirname(this.file)).receipt(snapshot.team,snapshot.user,to,id);
-      if (receipt) return receipt;
+      if (receipt && !(progress?.expectedFiles?.length)) return receipt;
       const s = await this.view(app, user), m = s.messages.find(m => m.channel === s.channel && m.user === s.user && (m.client_msg_id === id || this.messageId(m.text) === id));
-      if (!m) throw new TransportError('The app has not shown the earlier message. No duplicate was posted.', false);
+      if (!m || !(progress?.expectedFiles||[]).every(f=>m.files?.some(found=>found.name===f.name&&found.size===f.size)))
+        throw new TransportError('The app has not shown the earlier message and all its files. No duplicate was posted.', false);
       return {channel: m.channel, ts: m.ts};
     });
   }
@@ -273,7 +308,7 @@ export class SlackTransport implements Transport {
       for (const m of [...s.messages].sort((a, b) => Number(a.ts) - Number(b.ts))) {
         const peer = s.peers.find(p => p.id === m.channel); if (!peer) continue;
         const owner = peer.user === s.user;
-        if (m.user === s.user && !owner || m.subtype && m.subtype !== 'thread_broadcast') continue;
+        if (m.user === s.user && !owner || m.subtype && !['thread_broadcast','file_share'].includes(m.subtype)) continue;
         const read = readSlackText(m.text), text = 'text' in read ? read.text : m.text;
         if (!text.startsWith('A2ANotes') && !text.startsWith('A2A Reply/1 ') && !/^A2A [#@]/.test(text)) continue;
         if (owner && (m.user !== s.user || m.bot_id || m.app_id || text.startsWith('A2ANotes'))) continue;
@@ -307,6 +342,13 @@ export class SlackTransport implements Transport {
         if (bytes.length < 1 || bytes.length > maxBytes || bytes.toString('base64') !== item.base64 ||
           'APP' + createHash('sha256').update(bytes).digest('hex') !== fileRef) continue;
         return bytes;
+      }
+      for(const file of (m.files||[]).slice(0,5)){
+        if(file.size>Math.min(maxBytes,MAX_APP_ATTACHMENT_BYTES))continue;
+        const info=await this.nativeRead('files.info',{file:file.id});
+        if(info?.file?.id!==file.id||info.file.name!==file.name||info.file.size!==file.size||!app.downloadFile)continue;
+        const bytes=await app.downloadFile(info.file.url,file.size,Math.min(maxBytes,MAX_APP_ATTACHMENT_BYTES));
+        if('APP'+createHash('sha256').update(bytes).digest('hex')===fileRef)return bytes;
       }
       throw new TransportError('The attachment bytes do not match the saved message reference.', true);
     });

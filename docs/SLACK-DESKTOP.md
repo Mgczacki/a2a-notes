@@ -1,8 +1,9 @@
 # Slack Desktop transport
 
 A2A Notes uses the signed-in Slack Desktop app through a local debugging connection.
-It makes no direct Slack Web API requests.
 It calls the app's own API client inside the app.
+For a file upload, the adapter host sends bytes to a signed URL from that client.
+That binary upload is the only direct Slack HTTP request from A2A Notes.
 It does not read cookies or OAuth credentials.
 It never changes the open conversation, types in the composer, or clicks a Slack control.
 Slack does not document this app connection as a supported integration.
@@ -51,13 +52,19 @@ Receipt confirmation grants no approval.
 An existing reaction from that account counts as confirmation.
 The reaction means received and grants no approval.
 
-Small attachments travel as encoded data in the original message.
-The complete message must fit within 39,000 bytes.
-The adapter verifies the sender and timestamp before it returns file bytes.
-The protocol checks the file hash.
-Larger files fail before posting.
-This version does not use native file upload or download controls.
-Changed app controls cause a visible error.
+Agent request data travels inline in the note text, with a 26,000-byte limit.
+Supporting files become visible Slack attachments, with a 2 MiB adapter limit per file.
+The complete note text must fit within 39,000 bytes.
+The app client grants an upload URL for each file.
+The adapter checks that the URL uses HTTPS and the `files.slack.com` host.
+It sends the staged bytes without a cookie, token, or Authorization header.
+The request refuses redirects and stops after 30 seconds.
+The adapter saves the file ID and upload phase before it shares the file.
+It does not save the upload URL.
+The app client shares the files with the note text through `files.completeUploadExternal`.
+The adapter checks the message ID and each file name and size in Slack records.
+The protocol checks each downloaded file hash.
+Draft creation, revision, and approval reject files above the active limits.
 After correcting a failure before posting, use `a2anotes_retry_send` with the existing note ID and hash.
 The service retains the current approval and checks saved attempts before it queues the note.
 Uncertain delivery cannot use this operation.
@@ -78,9 +85,10 @@ The durable queue controls later attempts and honors Retry-After.
 Native posting is the only posting path.
 Unavailability before posting stops the note before posting. Use `a2anotes_retry_send` after Slack is ready.
 Invalid credentials and policy failures stop the native operation.
-Small attachments remain in the original message data.
-The native path also sends the existing display blocks.
-This preference makes no direct Slack HTTP call from A2A Notes.
+Text notes use the existing display blocks.
+File notes use the same note text as the file share comment.
+Slack ignores blocks when that comment is present.
+The signed binary file upload is the only direct Slack HTTP call.
 
 Without `--send`, A2A Notes reads and confirms receipt, but it does not post notes or delivery notices.
 The service still reads saved native receipts when it recovers an uncertain operation.
@@ -88,4 +96,6 @@ Closing the debugger connection does not permit another post for an uncertain no
 
 An outgoing note with saved Web API upload progress stops before the app adapter posts.
 Recover that unfinished operation with the earlier adapter before migrating it.
-The app adapter cannot replace an earlier shared file with an inline attachment.
+A lost binary upload starts with a new ticket because no file share has occurred.
+After an uncertain file share, the adapter searches Slack records for the note ID and all expected files.
+It does not call `files.completeUploadExternal` a second time.

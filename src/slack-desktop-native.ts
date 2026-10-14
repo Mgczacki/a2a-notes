@@ -18,6 +18,12 @@ export interface DesktopPost {
 }
 export interface DesktopRead { team: string; owner: string; method: string; args: Record<string, unknown> }
 export interface DesktopReaction { team: string; owner: string; channel: string; ts: string; name: string }
+export interface DesktopFile {
+  team: string; owner: string; operation: 'ticket' | 'complete';
+  channel?: string; messageId?: string; text?: string; threadTs?: string;
+  name?: string; length?: number;
+  files?: {id: string; title: string}[];
+}
 export interface NativeResult { data?: any; ok?: boolean; ready?: boolean; channel?: string; ts?: string; error?: string; definite?: boolean; status?: number; retryAfter?: number; requestId?: string }
 
 // Arguments travel as CDP values. They never become executable source code.
@@ -173,6 +179,7 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
       if (input.method === 'conversations.history') valid = only('channel','limit','latest','oldest','inclusive') && D.test(a.channel) &&
         limit(a.limit) && ts(a.latest) && ts(a.oldest) && (a.inclusive === undefined || a.inclusive === true);
       if (input.method === 'users.info') valid = only('user') && U.test(a.user);
+      if (input.method === 'files.info') valid = only('file') && /^F[A-Z0-9]+$/.test(a.file);
       if (input.method === 'users.list') valid = only('limit','cursor') && limit(a.limit) &&
         (a.cursor === undefined || typeof a.cursor === 'string' && /^[A-Za-z0-9=_%:-]{1,300}$/.test(a.cursor));
       if (!valid) return {error:'native_invalid_payload', definite:true};
@@ -192,13 +199,22 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
           ...(typeof m.app_id === 'string' ? {app_id:m.app_id.slice(0,40)} : {}), ...(typeof m.subtype === 'string' ? {subtype:m.subtype.slice(0,40)} : {}),
           ...(typeof m.client_msg_id === 'string' && /^[a-f0-9-]{36}$/i.test(m.client_msg_id) ? {client_msg_id:m.client_msg_id} : {}),
           reactions:(Array.isArray(m.reactions) ? m.reactions.slice(0,50) : []).map(x => ({name:text(x?.name),
-            users:Array.isArray(x?.users) ? x.users.filter(u => typeof u === 'string' && U.test(u)).slice(0,100) : []}))};
+            users:Array.isArray(x?.users) ? x.users.filter(u => typeof u === 'string' && U.test(u)).slice(0,100) : []})),
+          files:(Array.isArray(m.files) ? m.files.slice(0,5) : []).filter(f => /^F[A-Z0-9]+$/.test(f?.id) &&
+            typeof f?.name === 'string' && Number.isInteger(f?.size) && f.size > 0 && f.size <= 2097152)
+            .map(f => ({id:f.id,name:f.name.slice(0,200),size:f.size}))};
       };
       const next = typeof r.response_metadata?.next_cursor === 'string' && r.response_metadata.next_cursor ? r.response_metadata.next_cursor.slice(0,300) : undefined;
       let data;
       if (input.method === 'conversations.info' || input.method === 'conversations.open') data = {channel:channel(r.channel)};
       if (input.method === 'conversations.history') data = {messages:(Array.isArray(r.messages) ? r.messages.slice(0,200) : []).map(message).filter(Boolean)};
       if (input.method === 'users.info') data = {user:person(r.user)};
+      if (input.method === 'files.info') {
+        const f=r.file;
+        data={file:f && f.id===a.file && typeof f.name==='string' && Number.isInteger(f.size) &&
+          f.size>=1 && f.size<=2097152 && typeof f.url_private_download==='string' ?
+          {id:f.id,name:f.name.slice(0,200),size:f.size,url:f.url_private_download} : undefined};
+      }
       if (input.method === 'users.list') data = {members:(Array.isArray(r.members) ? r.members.slice(0,200) : []).map(person).filter(Boolean), ...(next ? {next} : {})};
       return {ok:true, data};
     } catch (error) {
@@ -211,6 +227,69 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
         ...(status===429 || code==='ratelimited' ? {retryAfter:Math.max(1, retryAfter || 60)} : {})};
     } finally { clearTimeout(timer); }
   }`;
-  return { capability, post, react, read };
+  const file = `async function(input) {
+    'use strict';
+    let enqueued = false, request, timer;
+    try {
+      ${lookup}
+      const F = /^F[A-Z0-9]+$/, D = /^D[A-Z0-9]+$/, TS = /^\\d+\\.\\d+$/;
+      const validUrl = value => {try {const u=new URL(value);return u.protocol==='https:' && u.hostname==='files.slack.com' &&
+        u.pathname.startsWith('/upload/') && !u.username && !u.password && !u.hash;}catch{return false;}};
+      const name = value => typeof value==='string' && value.length>=1 && value.length<=200 && !/[/\\\\\\x00-\\x1f]/.test(value);
+      let method,args;
+      if (input.operation==='ticket') {
+        if (!name(input.name) || !Number.isInteger(input.length) || input.length<1 || input.length>2097152)
+          return {error:'native_invalid_payload',definite:true};
+        method='files.getUploadURLExternal';args={filename:input.name,length:input.length};
+      } else if (input.operation==='complete') {
+        if (!D.test(input.channel) || !/^[a-f0-9-]{36}$/i.test(input.messageId) || typeof input.text!=='string' ||
+          input.text.length>39000 || !input.text.includes('A2A Notes data: ') ||
+          !Array.isArray(input.files) || input.files.length<1 || input.files.length>5 ||
+          input.files.some(f=>!F.test(f?.id)||!name(f?.title)) || input.threadTs && !TS.test(input.threadTs))
+          return {error:'native_invalid_payload',definite:true};
+        const marker=input.text.indexOf('A2A Notes data: ');
+        let wire;
+        try {wire=JSON.parse(input.text.slice(marker+'A2A Notes data: '.length));}catch{return {error:'native_invalid_payload',definite:true};}
+        if (typeof wire!=='string' || !wire.startsWith('A2ANotes/1\\nID: '+input.messageId+'\\n'))
+          return {error:'native_invalid_payload',definite:true};
+        method='files.completeUploadExternal';args={files:input.files,channel_id:input.channel,initial_comment:input.text,
+          ...(input.threadTs?{thread_ts:input.threadTs}:{})};
+      } else return {error:'native_invalid_payload',definite:true};
+      const original=queue.q,own=Object.getOwnPropertyDescriptor(queue,'q');
+      const controller=new AbortController();timer=setTimeout(()=>controller.abort(),20000);
+      let promise;
+      try {
+        queue.q=function(candidate,expedited){
+          if(candidate.method!==method) return original.call(this,candidate,expedited);
+          const actual=candidate.args||{};
+          if(input.operation==='ticket' && (actual.filename!==input.name || Number(actual.length)!==input.length) ||
+             input.operation==='complete' && (actual.channel_id!==input.channel || actual.initial_comment!==input.text ||
+               JSON.stringify(actual.files)!==JSON.stringify(input.files) ||
+               (actual.thread_ts||undefined)!==(input.threadTs||undefined)))
+            throw new Error('native_interface_changed');
+          const attempts=Object.getOwnPropertyDescriptor(candidate,'_maxAttempts');
+          if(!attempts?.writable||!Number.isInteger(attempts.value)||candidate._numberOfAttempts!==0)
+            throw new Error('native_interface_changed');
+          candidate._maxAttempts=1;request=candidate;enqueued=true;
+          return original.call(this,candidate,expedited);
+        };
+        promise=store.dispatch(api({method,reason:'a2anotes-file-'+input.operation,timeout:20,abortSignal:controller.signal,args}));
+      }finally{if(own)Object.defineProperty(queue,'q',own);else delete queue.q;}
+      const result=await promise;
+      if(!enqueued||result?.ok!==true)return {error:'native_delivery_uncertain',definite:false};
+      if(input.operation==='ticket') {
+        if(!F.test(result.file_id)||!validUrl(result.upload_url))return {error:'native_delivery_uncertain',definite:false};
+        return {ok:true,fileId:result.file_id,url:result.upload_url};
+      }
+      const ids=(Array.isArray(result.files)?result.files:[]).map(f=>f.id);
+      return input.files.every(f=>ids.includes(f.id))?{ok:true}:{error:'native_delivery_uncertain',definite:false};
+    }catch(error){
+      if(!enqueued)return {error:error?.message==='native_account_mismatch'?'native_account_mismatch':'native_interface_changed',definite:true};
+      const status=Number(error?.status),code=typeof error?.data?.error==='string'&&/^[a-z_]{1,80}$/.test(error.data.error)?error.data.error:'';
+      return {error:code||'native_delivery_uncertain',definite:status===429||status>=400&&status<500,
+        ...(status>=100&&status<=599?{status}:{})};
+    }finally{clearTimeout(timer);}
+  }`;
+  return { capability, post, react, read, file };
 }
 export const NATIVE_FUNCTIONS = nativeFunctions();

@@ -310,6 +310,7 @@ export class FakeSlackTransport implements Transport {
         upload = checkpoint.uploads[f.id] = { fileId: String(ticket.file_id), url: target.href, phase: 'allocated' }; save();
       }
       if (upload.phase === 'allocated') {
+        if (!upload.url) throw new TransportError('The saved upload address is missing.', true);
         if (!this.allowedHost(new URL(upload.url))) throw new TransportError('The saved upload address is not allowed.', true);
         let response: Response;
         try { response = await this.fetcher(upload.url, { method: 'POST', body: new Uint8Array(f.bytes), signal: AbortSignal.timeout(120_000) }); }
