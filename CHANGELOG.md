@@ -1,14 +1,17 @@
 # Changelog
 
+## 0.13.1
+
+- Post file notes with the formatted display blocks. Complete files privately, post the note, and attach the files with `chat.update`.
+- Start a new ticket after a lost binary upload or failed private completion.
+- Save the posted note timestamp. A later attempt only attaches the files and never posts the note again.
+
 ## 0.13.0
 
 - Send supporting Markdown files as visible Slack attachments through the signed-in app adapter.
 - Send file bytes to a signed `files.slack.com` upload URL from the adapter host. This is the only direct Slack HTTP request.
 - Keep agent request data inline. Check the 26,000-byte inline limit, 2 MiB file limit, and 39,000-byte text limit before approval.
 - Save the file ID and upload phase without the URL. Check the posted message ID, file names, sizes, and downloaded hashes.
-- Post file notes with the formatted display blocks. Complete files privately, post the note, and attach the files with `chat.update`.
-- Start a new ticket after a lost binary upload or failed private completion.
-- Save the posted note timestamp. A later attempt only attaches the files and never posts the note again.
 - Save each file method's rate limit and request ID.
 - Permit `files.info` to read the metadata for a received attachment.
 
