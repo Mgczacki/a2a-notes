@@ -6,6 +6,7 @@ export { Store, ServiceError, noteHash, type Note, type Role, type Data, type De
 export { NotesService, type Session, type ServiceOptions } from './service.ts';
 export { SlackTransport, slackAddress, parseSlackAddress, REQUIRED_SCOPES, OPTIONAL_SCOPES, type SlackConfig } from './slack.ts';
 export type { Transport, Received, Person, Identity } from './transport.ts';
+export { TransportError } from './transport.ts';
 export { createMcpServer, VERSION } from './mcp.ts';
 export { startHttp } from './http.ts';
 export { Clients } from './clients.ts';

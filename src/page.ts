@@ -65,6 +65,7 @@ function card(m, trusted) {
   if (m.allowed_actions.includes('approve')) actions.append(el('button', { class: 'primary', onclick: act(() => api('/api/messages/' + m.id + '/decide', { hash: m.hash, decision: 'approve' })) }, 'Approve this version'));
   if (m.allowed_actions.includes('reject')) actions.append(el('button', { onclick: act(() => api('/api/messages/' + m.id + '/decide', { hash: m.hash, decision: 'reject' })) }, 'Reject'));
   if (m.allowed_actions.includes('send')) actions.append(el('button', { class: 'primary', onclick: act(() => api('/api/messages/' + m.id + '/send', { hash: m.hash })) }, m.state === 'delivery_uncertain' ? 'Check and send' : 'Send'));
+  if (m.allowed_actions.includes('retry_send')) actions.append(el('button', { onclick: act(() => api('/api/messages/' + m.id + '/retry-send', { hash: m.hash })) }, 'Retry approved note'));
   if (!m.failure && peer) actions.append(el('button', { onclick: act(() => api('/api/trusted', { address: peer, name: m.peer_name || peer, trusted: !trusted })) }, trusted ? 'Stop trusting sender' : 'Trust sender'));
   return el('article', { class: 'card', 'data-id': m.id },
     el('div', { class: 'row' }, el('h3', {}, m.subject), el('span', { class: 'status ' + stateClass(m.state) }, m.state.replace('_', ' ')), el('span', { class: 'status info' }, 'for ' + m.audience)),

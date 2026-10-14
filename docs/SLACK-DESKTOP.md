@@ -52,7 +52,10 @@ The adapter verifies the sender and timestamp before it returns file bytes.
 The protocol checks the file hash.
 Larger files fail before posting.
 This version does not use native file upload or download controls.
-Changed app controls cause a visible error and require a retry after correction.
+Changed app controls cause a visible error.
+After correcting a failure before posting, use `a2anotes_retry_send` with the existing note ID and hash.
+The service retains the current approval and checks saved attempts before it queues the note.
+Uncertain delivery cannot use this operation.
 
 Decision: the Slack app is the only production Slack transport.
 

@@ -7,7 +7,7 @@ import { END_MARKER, FILE_VERSION, WIRE_VERSION } from './protocol.ts';
 import { ServiceError } from './store.ts';
 import type { NotesService, Session } from './service.ts';
 
-export const VERSION = '0.11.1';
+export const VERSION = '0.11.2';
 // The body format and writing rules for the draft tools (docs/WRITING-MESSAGES.md has the full text and examples).
 export const BODY_GUIDE = [
   'Write the body for a person who has none of your context: why they get the message, the facts they need, one ask, and a date if one applies.',
@@ -129,6 +129,12 @@ export function createMcpServer(service: NotesService, session: Session, extra: 
   server.registerTool('a2anotes_send', { description: 'Attempts an approved queued draft when its deadline permits delivery. Rate limits schedule retries of unchanged content. Uncertain writes require reconciliation. Read delivery.nextAttemptAt or next_retry_at for the next attempt.',
     inputSchema: { id: z.string().max(100), expected_hash: z.string().max(64), request_id: z.string() },
   }, args => run(() => service.send(session, args), v => `${v.id} is ${v.state}.`));
+
+  server.registerTool('a2anotes_retry_send', {
+    description: 'Queues an unchanged approved note after a recorded app failure before posting. Only person and reviewer sessions can call it. Checks current content, policy, files, and saved attempts. Refuses uncertain delivery. Keeps the message ID and approval. Reuse request_id for retries of this call. Read next_retry_at for delivery timing.',
+    inputSchema: { id: z.string().max(100), expected_hash: z.string().regex(/^[0-9a-f]{64}$/), request_id: z.string() },
+    annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  }, args => run(() => service.retrySend(session, args), v => `${v.id} is ${v.state}. Existing approval retained.`));
 
   server.registerTool('a2anotes_ack', { description: 'Acknowledges receipt of an incoming message. It never approves content or actions. Slack adds the configured reaction.',
     inputSchema: { id: z.string().max(100), expected_hash: z.string().regex(/^[0-9a-f]{64}$/) },

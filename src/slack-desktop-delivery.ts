@@ -27,6 +27,11 @@ export class DesktopDeliveries {
     this.records = saved;
   }
   private save() { savePrivate(this.file, this.records); }
+  verifyRetry(team: string, owner: string, to: string, messageId: string, channel: string) {
+    const r = this.records.find(r => r.messageId === messageId);
+    if (r && (r.team !== team || r.owner !== owner || r.to !== to || r.channel !== channel || r.started || r.ts || r.conflict))
+      throw new TransportError('The saved native attempt does not permit another post.', true);
+  }
   begin(input: DesktopPost) {
     const expected = hash(JSON.stringify([input.team, input.owner, input.to, input.channel, input.text, input.blocks, input.threadTs || '']));
     let record = this.records.find(r => r.messageId === input.messageId);

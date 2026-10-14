@@ -5,7 +5,7 @@ import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DesktopDeliveries } from './slack-desktop-delivery.ts';
 import { DesktopUnavailableError, type SlackDesktopHook } from './slack-desktop.ts';
-import { type AgentDeliveryStatus, savePrivate } from './store.ts';
+import { type AgentDeliveryStatus, type SendCheckpoint, savePrivate } from './store.ts';
 import { TransportError, type Identity, type Person, type Received, type SendInput, type Transport } from './transport.ts';
 import { readSlackText, slackBlocks, DATA_MARKER, MAX_SLACK_TEXT } from './slack-format.ts';
 import { SlackAppConnection, type AppConnection, type AppSnapshot } from './slack-app.ts';
@@ -28,7 +28,7 @@ export function parseSlackAddress(address: string) {
 }
 interface Binding {team: string; user: string; name: string}
 export class SlackTransport implements Transport {
-  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'>;
+  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'> & Partial<Pick<SlackDesktopHook, 'status'>>;
   readonly name = 'slack'; readonly fileField = 'Slack';
   private binding?: Binding;
   private verified = false;
@@ -37,8 +37,10 @@ export class SlackTransport implements Transport {
   private tail: Promise<unknown> = Promise.resolve();
   private cache?: AppSnapshot;
   private readonly connection: (user?: string) => Promise<AppConnection>;
+  private readonly waitTimeoutMs: number;
   constructor(readonly file: string, readonly config: SlackConfig, fetcher?: typeof fetch,
-    options: {open?: (user?: string) => Promise<AppConnection>; now?: () => number} = {}) {
+    options: {open?: (user?: string) => Promise<AppConnection>; now?: () => number; waitTimeoutMs?: number} = {}) {
+    this.waitTimeoutMs = options.waitTimeoutMs ?? 20_000;
     const saved = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : undefined;
     if (saved?.disabled === true) this.disabled = true;
     else if (saved) {
@@ -87,7 +89,7 @@ export class SlackTransport implements Transport {
   async refresh() {if (!this.disabled) await this.run(async () => {});}
   disconnect() {this.generation++; this.disabled = true; this.verified = false; this.binding = undefined; this.cache = undefined; savePrivate(this.file, {disabled:true});}
   private async wait(app: AppConnection, check: (s: AppSnapshot) => boolean) {
-    for (const until = Date.now() + 20_000; Date.now() < until; await new Promise(r => setTimeout(r, 100))) {
+    for (const until = Date.now() + this.waitTimeoutMs; Date.now() < until; await new Promise(r => setTimeout(r, 100))) {
       let s: AppSnapshot;
       try {s=await app.snapshot();} catch(error) {
         if(error instanceof TransportError && !error.definite && error.method === 'slack.desktop') continue;
@@ -129,6 +131,15 @@ export class SlackTransport implements Transport {
   async verifyDesktopChannel(channel: string) {
     return this.run(async (app, s) => {const view = await this.view(app, channel); return view.peers.some(p => p.id === channel && p.user === s.user);});
   }
+  async verifyRetry(to: string, messageId: string, checkpoint: SendCheckpoint) {
+    const {team} = parseSlackAddress(to);
+    if (team !== this.config.teamId || checkpoint.postStarted || !/^D[A-Z0-9]+$/.test(checkpoint.channel || '') ||
+        Object.values(checkpoint.uploads).some(u => u.phase !== 'complete' || !/^APP[a-f0-9]{64}$/.test(u.fileId)))
+      throw new TransportError('Saved post or file progress does not permit this retry.', true);
+    await this.run(async (_app, s) => {
+      new DesktopDeliveries(dirname(this.file)).verifyRetry(s.team, s.user, to, messageId, checkpoint.channel!);
+    });
+  }
   async send(input: SendInput) {
     if (Object.values(input.checkpoint?.uploads || {}).some(upload => !/^APP[a-f0-9]{64}$/.test(upload.fileId)))
       throw new TransportError('Saved file progress requires the earlier Slack adapter. No new message was posted.', true);
@@ -154,10 +165,22 @@ export class SlackTransport implements Transport {
       checkpoint.channel = channel;
       for (const f of input.files) checkpoint.uploads[f.id] = {fileId:files[f.id], url:'slack-app:inline', phase:'complete'};
       input.saveCheckpoint?.(checkpoint);
-      if (this.desktopSender?.canSend()) {
+      const nativeSelected = this.desktopSender && (this.desktopSender.status?.().sendEnabled ?? true);
+      const notReady = () => new TransportError('Slack native sending is not ready. No post was started.', true, 0, 'slack.desktop', undefined, undefined, 'app_control_unavailable');
+      if (nativeSelected) {
+        try { await this.wait(app, s => s.channel === channel && this.desktopSender!.canSend()); }
+        catch (error) {
+          if (error instanceof TransportError && !error.definite)
+            throw notReady();
+          throw error;
+        }
+      }
+      const nativeReady = this.desktopSender?.canSend() === true;
+      if (nativeSelected && !nativeReady) throw notReady();
+      if (nativeReady) {
         checkpoint.postTransport = 'desktop';
         try {
-          const receipt = await this.desktopSender.post({team:s.team, owner:s.user, to:input.to, channel,
+          const receipt = await this.desktopSender!.post({team:s.team, owner:s.user, to:input.to, channel,
             messageId:input.messageId, text, blocks:JSON.stringify(slackBlocks(input.display, {projectLink:this.config.projectLink})),
             ...(input.threadTs ? {threadTs:input.threadTs} : {})}, () => {
               if (this.disabled || this.generation !== generation || this.binding?.team !== s.team || this.binding?.user !== s.user)

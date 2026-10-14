@@ -35,7 +35,7 @@ export class TransportError extends Error {
   // definite: the service answered and did not post the message. A timeout or lost reply is not definite.
   readonly method?: string;
   readonly rateLimited: boolean;
-  constructor(message: string, readonly definite: boolean, readonly retryAfter = 0, methodOrRateLimited?: string | boolean, readonly status?: number, readonly requestId?: string) {
+  constructor(message: string, readonly definite: boolean, readonly retryAfter = 0, methodOrRateLimited?: string | boolean, readonly status?: number, readonly requestId?: string, readonly failureCode?: 'app_control_unavailable') {
     super(message);
     this.method = typeof methodOrRateLimited === 'string' ? methodOrRateLimited : undefined;
     this.rateLimited = methodOrRateLimited === true || status === 429 || retryAfter > 0;
@@ -50,6 +50,8 @@ export interface Transport {
   findPeople(query: string, limit: number, cursor?: string): Promise<{ people: Person[]; next?: string }>;
   checkRecipient(address: string): Promise<Person>;
   send(input: SendInput): Promise<SendResult>;
+  // Checks saved attempts before a stopped note can return to the queue. This method must not post.
+  verifyRetry?(to: string, messageId: string, checkpoint: SendCheckpoint): Promise<void>;
   // The adapter interprets its saved reference. Receipt grants no approval.
   acknowledge?(reference: Record<string, string>): Promise<void>;
   // Send a fixed delivery notice. It grants no authority and contains no message body.

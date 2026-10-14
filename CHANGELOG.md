@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.2
+
+- Queue the same approved note after a verified app failure before posting.
+- Preserve the approval and saved file progress during that retry.
+- Refuse uncertain delivery or a saved native attempt that could have posted.
+- Wait for the selected native sender after navigation.
+- Add a retry tool and a retry button to the review page.
+
 ## 0.11.1
 
 - Read verified member names from current Slack avatar records.

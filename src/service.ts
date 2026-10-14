@@ -156,6 +156,7 @@ export class NotesService {
       if (this.editable(n) && this.canEdit(n, session)) actions.push('revise');
       if (['draft', 'approved'].includes(n.state) && canApprove) actions.push('approve', 'reject');
       if ((n.state === 'approved' && this.approvalValid(n, data) || n.state === 'delivery_uncertain' && !n.delivery) && this.canSend(n, session)) actions.push('send');
+      if (this.retryableBeforePost(n) && this.approvalValid(n, data) && this.canSend(n, session) && this.transport.verifyRetry) actions.push('retry_send');
     } else {
       if (n.state === 'held' && canApprove) actions.push('approve', 'reject');
       if (n.state === 'approved' && this.approvalValid(n, data)) actions.push('reply', ...(n.audience !== 'person' ? ['release_to_agent'] : []));
@@ -173,6 +174,13 @@ export class NotesService {
   private canEdit(n: Note, session: Session) { return session.role === 'person' || n.createdBy?.session === session.name; }
   // the design lets an agent write and revise drafts; only the person or the review agent sends
   private canSend(_n: Note, session: Session) { return session.role !== 'agent'; }
+  private retryableBeforePost(n: Note) {
+    return n.direction === 'out' && n.state === 'permanent_failure' && !!n.delivery?.stoppedAt &&
+      n.delivery.attempts > 0 && n.delivery.attempts < 8 && !n.delivery.uncertain && !n.transport?.ts &&
+      !!n.checkpoint?.channel && !n.checkpoint.postStarted &&
+      (n.delivery.failureCode === 'app_control_unavailable' || n.delivery.failureCode === 'transport_error' &&
+        n.error === 'The Slack app control is unavailable. No action was confirmed.');
+  }
 
   // What a session may see. The person sees everything. Agents and the review agent never see failed or quarantined
   // text. They see an incoming body only after a valid approval, and never the body of a message for a person only.
@@ -555,6 +563,50 @@ export class NotesService {
     return this.get(session, id);
   }
 
+  async retrySend(session: Session, input: { id?: unknown; expected_hash?: unknown; request_id?: unknown }) {
+    const requestId = this.requestId(input.request_id), id = String(input.id);
+    const validate = (data: Data) => {
+      const n = data.notes.find(n => n.id === id && n.direction === 'out');
+      if (!n) throw new ServiceError('not_found', 'No outgoing message has this ID.');
+      if (!this.canSend(n, session)) throw new ServiceError('forbidden', 'An agent session cannot retry a send.');
+      if (input.expected_hash !== n.hash) throw new ServiceError('hash_changed', 'The message changed since you read it.');
+      if (!this.approvalValid(n, data) || n.delivery?.hash !== n.hash)
+        throw new ServiceError('approval_invalid', 'The content or current policy no longer permits this send.');
+      const files = this.files(data, n);
+      if (files.length !== n.fileIds.length + (n.agentFileId ? 1 : 0) || noteHash(n, files) !== n.hash)
+        throw new ServiceError('content_changed', 'The approved content or file records changed.');
+      for (const file of files) this.store.readFileBytes(file);
+      const identity = this.transport.identity();
+      if (!identity || identity.address !== n.from || identity.missingScopes.length || identity.available === false)
+        throw new ServiceError('invalid_credentials', 'The connected sender no longer matches this note.');
+      const earlier = data.requests[requestId];
+      if (earlier && (earlier.tool !== 'retry_send' || earlier.id !== id))
+        throw new ServiceError('request_conflict', 'This request_id belongs to another operation.');
+      return {n, earlier};
+    };
+    const {n, earlier} = validate(this.store.read());
+    if (earlier || ['queued', 'sending', 'sent'].includes(n.state)) return this.get(session, id);
+    if (this.stopping) throw new ServiceError('service_stopping', 'The service is stopping.');
+    if (!this.retryableBeforePost(n)) throw new ServiceError('retry_not_permitted', 'This failure does not permit another post.');
+    if (!this.transport.verifyRetry) throw new ServiceError('retry_not_supported', 'This transport cannot verify saved attempts.');
+    if (this.sending.has(id)) throw new ServiceError('send_in_progress', 'This message is already being checked.');
+    this.sending.add(id);
+    try {
+      await this.transport.verifyRetry(n.to, n.messageId, n.checkpoint!);
+      if (this.stopping) throw new ServiceError('service_stopping', 'The service is stopping.');
+      this.store.update(id, (x, data) => {
+        validate(data);
+        if (!this.retryableBeforePost(x)) throw new ServiceError('retry_not_permitted', 'The saved delivery changed during the check.');
+        x.state = 'queued'; delete x.error;
+        delete x.delivery!.stoppedAt; delete x.delivery!.failureCode;
+        x.delivery!.nextAttemptAt = this.at();
+        data.requests[requestId] = {tool:'retry_send', id, at:this.at()};
+        this.store.audit(data, session.name, 'send_retry_queued', id);
+      });
+      return this.get(session, id);
+    } finally { this.sending.delete(id); }
+  }
+
   async processQueue() {
     if (this.stopping) return;
     await this.acknowledgements.process();
@@ -669,7 +721,7 @@ export class NotesService {
         if (uncertain) throw new ServiceError('delivery_uncertain', e.message, 'The service checks saved progress before a retry.');
         return;
       }
-      this.finishFailure(id, t?.rateLimited ? 'retry_exhausted' : uncertain ? 'delivery_uncertain' : error instanceof ServiceError ? error.code : 'transport_error', e.message);
+      this.finishFailure(id, t?.rateLimited ? 'retry_exhausted' : uncertain ? 'delivery_uncertain' : error instanceof ServiceError ? error.code : t?.failureCode || 'transport_error', e.message);
       if (!t?.rateLimited) throw new ServiceError('send_failed', e.message, 'Read the final failure. This note will not retry.');
     } finally { this.sending.delete(id); }
   }

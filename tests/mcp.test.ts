@@ -148,7 +148,7 @@ test('the stdio bridge connects a command-line agent to the running service', as
 });
 
 test('OAuth tools and callbacks are absent, and healthz reports the app-only version', async () => {
-  assert.deepEqual(await (await fetch(`${alex.running.server.url}/healthz`)).json(), {ok: true, version: '0.11.1'});
+  assert.deepEqual(await (await fetch(`${alex.running.server.url}/healthz`)).json(), {ok: true, version: '0.11.2'});
   const human = await connect(alex.url, alex.token('signin-person', 'person'));
   const agentClient = await connect(alex.url, alex.token('signin-agent', 'agent'));
   for (const c of [human, agentClient]) {

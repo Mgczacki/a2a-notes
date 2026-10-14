@@ -8,13 +8,17 @@ import {SlackTransport} from '../src/slack.ts';
 import {rendererSnapshot, rendererAction, type AppConnection, type AppSnapshot} from '../src/slack-app.ts';
 import {NotesService} from '../src/service.ts';
 import {Store} from '../src/store.ts';
-import {person} from './helpers.ts';
+import {person, agent, reviewer} from './helpers.ts';
 import {DesktopDeliveries} from '../src/slack-desktop-delivery.ts';
 import {DesktopUnavailableError} from '../src/slack-desktop.ts';
 import {TransportError} from '../src/transport.ts';
 import {randomUUID} from 'node:crypto';
+import {sha256} from '../src/protocol.ts';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
+import {createMcpServer} from '../src/mcp.ts';
 
-function fixture() {
+function fixture(options: {waitTimeoutMs?: number} = {}) {
   const s: AppSnapshot = {team:'TEXAMPLE', user:'UMARIO01', channel:'DOTHER01', peers:[{id:'DOTHER01',user:'UALEX01'},{id:'DSELF01',user:'UMARIO01'}],
     people:[{id:'UMARIO01',name:'Mario',realName:'Mario',title:'',active:true},{id:'UALEX01',name:'Alex',realName:'Alex',title:'',active:true}], messages:[], editor:true,draft:''};
   const calls: string[] = [];
@@ -25,10 +29,173 @@ function fixture() {
     async react(ts, name) {calls.push('react:'+ts); s.messages.find(m => m.ts === ts)!.reactions.push({name,users:[s.user]});}, async close() {},
   };
   const file = join(mkdtempSync(join(tmpdir(),'app-transport-')), 'account.json');
-  const transport = new SlackTransport(file,{teamId:s.team},undefined,{open:async () => app});
+  const transport = new SlackTransport(file,{teamId:s.team},undefined,{open:async () => app,...options});
   return {s,app,calls,file,transport};
 }
 const message = {channel:'DOTHER01', user:'UALEX01',text:'A2A #7\nPlease read this.',ts:'1791934900.001',reactions:[]};
+
+async function stoppedNote(t: any, withFile = false) {
+  const f = fixture(); await f.transport.connect();
+  const service = new NotesService({store:new Store(join(f.file,'..')),transport:f.transport,scanIntervalMs:0,retryIntervalMs:0});
+  t.after(() => service.stop());
+  const file = withFile ? service.stageFile(person,{name:'plan.txt',text:'Approved attachment',sha256:sha256(Buffer.from('Approved attachment')),request_id:randomUUID()}) : undefined;
+  const d = await service.createDraft(person,{to_address:'slack:TEXAMPLE:UALEX01',subject:'Read the plan',body:'Please read the plan.',audience:'person',
+    ...(file ? {file_ids:[file.file_id]} : {}),request_id:randomUUID()});
+  service.approve(person,{id:d.id,expected_hash:d.hash,decision:'approve'});
+  f.app.compose = async () => {throw new TransportError('The Slack app control is unavailable. No action was confirmed.',true);};
+  await assert.rejects(service.send(person,{id:d.id,expected_hash:d.hash,request_id:randomUUID()}),/No action was confirmed/);
+  assert.equal(service.store.note(d.id)!.state,'permanent_failure');
+  assert.equal(service.store.note(d.id)!.checkpoint?.postStarted,undefined);
+  return {...f,service,d,attachment:file};
+}
+
+test('an approved pre-post failure retries once after restart with the same note, files, and approval', async t => {
+  const f = await stoppedNote(t,true), request_id = randomUUID();
+  const before = structuredClone(f.service.store.note(f.d.id)!);
+  const queued = await f.service.retrySend(person,{id:f.d.id,expected_hash:f.d.hash,request_id});
+  assert.equal(queued.state,'queued'); assert.equal(queued.message_id,f.d.message_id);
+  assert.deepEqual(f.service.store.note(f.d.id)!.checkpoint,before.checkpoint);
+  assert.deepEqual(f.service.store.note(f.d.id)!.approval,before.approval);
+  assert.equal(f.service.store.note(f.d.id)!.delivery!.attempts,1);
+  await f.service.stop();
+  const transport = new SlackTransport(f.file,{teamId:f.s.team},undefined,{open:async()=>f.app});
+  await transport.connect(); let posts=0;
+  transport.desktopSender={canSend:()=>true,post:async(input,dispatch)=>{dispatch();posts++;assert.equal(input.messageId,f.d.message_id);
+    assert.match(input.text,/Approved attachment|QXBwcm92ZWQgYXR0YWNobWVudA==/);return {channel:input.channel,ts:'1791935000.020'};}};
+  const service = new NotesService({store:new Store(join(f.file,'..')),transport,scanIntervalMs:0,retryIntervalMs:0});
+  t.after(()=>service.stop());
+  await service.retrySend(person,{id:f.d.id,expected_hash:f.d.hash,request_id});
+  await service.processQueue();
+  await service.retrySend(person,{id:f.d.id,expected_hash:f.d.hash,request_id});
+  await service.processQueue();
+  const n=service.store.note(f.d.id)!;
+  assert.equal(n.state,'sent'); assert.equal(posts,1); assert.equal(n.delivery!.attempts,2);
+  assert.equal(n.hash,before.hash);assert.equal(n.to,before.to);assert.equal(n.from,before.from);assert.equal(n.audience,before.audience);
+  assert.deepEqual(n.approval,before.approval);
+  assert.equal(service.store.read().audit.filter(a=>a.id===n.id&&a.action==='approve').length,1);
+  assert.ok(!f.calls.includes('compose'));assert.ok(!f.calls.includes('submit'));
+});
+
+test('retry requests serialize while saved native attempts are checked', async t => {
+  const f = await stoppedNote(t), verify = f.transport.verifyRetry.bind(f.transport);
+  let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+  f.transport.verifyRetry=async(...args)=>{await gate;await verify(...args);};
+  const input={id:f.d.id,expected_hash:f.d.hash,request_id:randomUUID()};
+  const first=f.service.retrySend(person,input);
+  await assert.rejects(f.service.retrySend(person,input),(e:any)=>e.code==='send_in_progress');
+  release();await first;
+  await f.service.retrySend(person,input);
+  assert.equal(f.service.store.read().audit.filter(a=>a.id===f.d.id&&a.action==='send_retry_queued').length,1);
+});
+
+test('a lost response after an approved retry recovers its receipt after restart without another post',async t=>{
+  const f=await stoppedNote(t,true);let posts=0;
+  const deliveries=new DesktopDeliveries(join(f.file,'..'));
+  f.transport.desktopSender={canSend:()=>true,post:async(input,before)=>{
+    before();posts++;deliveries.begin(input);deliveries.confirmed(input.messageId,input.channel,'1791935000.023');
+    throw new TransportError('Lost native response',false);
+  }};
+  const input={id:f.d.id,expected_hash:f.d.hash,request_id:randomUUID()};
+  await f.service.retrySend(person,input);await f.service.processQueue();
+  assert.equal(f.service.store.note(f.d.id)!.state,'delivery_uncertain');
+  await assert.rejects(f.service.retrySend(person,{...input,request_id:randomUUID()}),(e:any)=>e.code==='retry_not_permitted');
+  await f.service.stop();
+  const transport=new SlackTransport(f.file,{teamId:f.s.team},undefined,{open:async()=>f.app});await transport.connect();
+  const service=new NotesService({store:new Store(join(f.file,'..')),transport,now:()=>Date.now()+100_000,scanIntervalMs:0,retryIntervalMs:0});
+  t.after(()=>service.stop());await service.processQueue();
+  const n=service.store.note(f.d.id)!;
+  assert.equal(n.state,'sent');assert.equal(n.transport!.ts,'1791935000.023');assert.equal(posts,1);
+  assert.match(n.transport!.files![f.attachment!.file_id],/^APP[a-f0-9]{64}$/);
+  assert.ok(!f.calls.includes('submit'));
+});
+
+for (const change of ['agent','hash','content','policy','credentials','started','uncertain','exhausted','invalid_auth','file_progress'] as const) {
+  test(`pre-post retry refuses ${change}`,async t=>{
+    const f=await stoppedNote(t);
+    if(change==='content')f.service.store.update(f.d.id,n=>{n.body='Changed content';});
+    if(change==='policy')f.service.store.change(d=>{d.policy.version++;});
+    if(change==='credentials')f.transport.identity=()=>null;
+    if(change==='started')f.service.store.update(f.d.id,n=>{n.checkpoint!.postStarted=true;});
+    if(change==='uncertain')f.service.store.update(f.d.id,n=>{n.delivery!.uncertain=true;});
+    if(change==='exhausted')f.service.store.update(f.d.id,n=>{n.delivery!.attempts=8;});
+    if(change==='invalid_auth')f.service.store.update(f.d.id,n=>{n.error='Slack Desktop: invalid_auth';});
+    if(change==='file_progress')f.service.store.update(f.d.id,n=>{n.checkpoint!.uploads.old={fileId:'FOLD01',url:'slack-app:inline',phase:'complete'};});
+    await assert.rejects(f.service.retrySend(change==='agent'?agent:person,{id:f.d.id,expected_hash:change==='hash'?'old':f.d.hash,request_id:randomUUID()}));
+    assert.equal(f.service.store.note(f.d.id)!.state,'permanent_failure');
+    assert.ok(!f.calls.includes('submit'));
+  });
+}
+
+test('retry reads file bytes and checks policy again after the transport check',async t=>{
+  const f=await stoppedNote(t,true);
+  const path=f.service.store.filePath(f.attachment!.file_id);
+  writeFileSync(path,'Altered attachment');
+  await assert.rejects(f.service.retrySend(person,{id:f.d.id,expected_hash:f.d.hash,request_id:randomUUID()}));
+  writeFileSync(path,'Approved attachment');
+  const verify=f.transport.verifyRetry.bind(f.transport);
+  f.transport.verifyRetry=async(...args)=>{await verify(...args);f.service.store.change(d=>{d.policy.version++;});};
+  await assert.rejects(f.service.retrySend(person,{id:f.d.id,expected_hash:f.d.hash,request_id:randomUUID()}),(e:any)=>e.code==='approval_invalid');
+  assert.equal(f.service.store.note(f.d.id)!.state,'permanent_failure');
+});
+
+for (const state of ['started','receipt','identity'] as const) {
+  test(`retry refuses a saved native ${state} record`,async t=>{
+    const f=await stoppedNote(t), deliveries=new DesktopDeliveries(join(f.file,'..'));
+    const input={team:f.s.team,owner:state==='identity'?'UEVE01':f.s.user,to:f.d.to,channel:'DOTHER01',messageId:f.d.message_id,
+      text:'Saved content',blocks:'[]'};
+    deliveries.begin(input);
+    if(state==='receipt')deliveries.confirmed(input.messageId,input.channel,'1791935000.021');
+    if(state==='identity')deliveries.failed(input.messageId,true);
+    await assert.rejects(f.service.retrySend(person,{id:f.d.id,expected_hash:f.d.hash,request_id:randomUUID()}),/saved native attempt/);
+    assert.equal(f.service.store.note(f.d.id)!.state,'permanent_failure');
+  });
+}
+
+test('a reviewer can retry under a current human approval but request IDs cannot name another operation',async t=>{
+  const f=await stoppedNote(t),request_id=randomUUID();
+  f.service.store.change(d=>{d.requests[request_id]={tool:'send',id:f.d.id,at:new Date().toISOString()};});
+  await assert.rejects(f.service.retrySend(reviewer,{id:f.d.id,expected_hash:f.d.hash,request_id}),(e:any)=>e.code==='request_conflict');
+  assert.equal((await f.service.retrySend(reviewer,{id:f.d.id,expected_hash:f.d.hash,request_id:randomUUID()})).state,'queued');
+});
+
+test('navigation waits for native readiness and never chooses composer during recovery',async()=>{
+  const f=fixture();await f.transport.connect();f.s.channel='DSELF01';let polls=0,posts=0;
+  f.transport.desktopSender={canSend:()=>++polls>=3,post:async(input,before)=>{before();posts++;return {channel:input.channel,ts:'1791935000.022'};}};
+  await f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:randomUUID(),files:[],wire:()=> 'A2ANotes/1',display:{subject:'Plan',body:'Please read.',audience:'person',senderName:'Mario',files:[]}});
+  assert.equal(posts,1);assert.deepEqual(f.calls,['navigate:DOTHER01']);
+});
+
+test('a selected native sender that stays unavailable stops before composing or posting',async()=>{
+  const f=fixture({waitTimeoutMs:5});await f.transport.connect();let checkpoint:any;
+  f.transport.desktopSender={canSend:()=>false,post:async()=>{throw new Error('Must not post');}};
+  await assert.rejects(f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:randomUUID(),files:[],wire:()=> 'A2ANotes/1',display:{subject:'Plan',body:'Please read.',audience:'person',senderName:'Mario',files:[]},
+    saveCheckpoint:c=>{checkpoint=structuredClone(c);}}),(e:any)=>e.failureCode==='app_control_unavailable');
+  assert.equal(checkpoint.postStarted,undefined);assert.deepEqual(f.calls,[]);
+});
+
+test('native readiness lost after the wait cannot select composer posting',async()=>{
+  const f=fixture();await f.transport.connect();let checks=0;
+  f.transport.desktopSender={canSend:()=>++checks===1,post:async()=>{throw new Error('Must not post');}};
+  await assert.rejects(f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:randomUUID(),files:[],wire:()=> 'A2ANotes/1',display:{subject:'Plan',body:'Please read.',audience:'person',senderName:'Mario',files:[]}}),
+    (e:any)=>e.failureCode==='app_control_unavailable');
+  assert.deepEqual(f.calls,[]);
+});
+
+test('the MCP retry tool preserves approval and enforces the caller role',async t=>{
+  const f=await stoppedNote(t);
+  const input={id:f.d.id,expected_hash:f.d.hash,request_id:randomUUID()};
+  for(const session of [agent,reviewer]){
+    const server=createMcpServer(f.service,session),client=new Client({name:'retry-test',version:'1'});
+    const [a,b]=InMemoryTransport.createLinkedPair();
+    await server.connect(a);await client.connect(b);
+    try{
+      const result=await client.callTool({name:'a2anotes_retry_send',arguments:input});
+      if(session===agent){assert.equal(result.isError,true);assert.equal((result.structuredContent as any).error.code,'forbidden');}
+      else {assert.equal(result.isError,undefined);assert.equal((result.structuredContent as any).state,'queued');}
+    }finally{await client.close();await server.close();}
+  }
+  assert.equal(f.service.store.read().audit.filter(a=>a.id===f.d.id&&a.action==='approve').length,1);
+});
 
 test('native app posting queues a 429 under the same approval without using composer controls', async () => {
   const f=fixture(); await f.transport.connect(); let now=Date.now(), posts=0;

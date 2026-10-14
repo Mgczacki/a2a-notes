@@ -191,7 +191,8 @@ export class SlackAppConnection implements AppConnection {
   private async action(action: string, value: string, thread?: string) {
     await this.account();
     const expression = `(() => { const __name = f => f; return (${rendererAction.toString()})(${JSON.stringify(action)},${JSON.stringify(value)},${JSON.stringify(thread)},${JSON.stringify(this.expectedChannel)},${JSON.stringify(this.expectedDraft)}); })()`;
-    if (!await this.evaluate(expression)) throw new TransportError('The Slack app control is unavailable. No action was confirmed.', true);
+    if (!await this.evaluate(expression)) throw new TransportError('The Slack app control is unavailable. No action was confirmed.', true,
+      0, 'slack.desktop', undefined, undefined, 'app_control_unavailable');
   }
   async compose(text: string, threadTs?: string) {
     this.expectedChannel = (await this.snapshot()).channel;

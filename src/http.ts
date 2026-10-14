@@ -131,6 +131,8 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
     }
     if (req.method === 'POST' && parts[1] === 'messages' && parts[3] === 'decide') return reply(service.approve(session, { id: parts[2], expected_hash: body.hash, decision: body.decision }));
     if (req.method === 'POST' && parts[1] === 'messages' && parts[3] === 'send') return reply(await service.send(session, { id: parts[2], expected_hash: body.hash, request_id: `page-${parts[2]}-${String(body.hash).slice(0, 16)}-${Date.now()}` }));
+    if (req.method === 'POST' && parts[1] === 'messages' && parts[3] === 'retry-send') return reply(await service.retrySend(session, { id: parts[2], expected_hash: body.hash,
+      request_id: typeof body.request_id === 'string' ? body.request_id : `page-retry-${parts[2]}-${String(body.hash).slice(0, 16)}` }));
     if (req.method === 'POST' && parts[1] === 'messages' && parts[3] === 'delivery') return reply(await service.reportAgentDelivery(session, { id: parts[2], expected_hash: body.hash, status: body.status }));
     if (req.method === 'POST' && parts[1] === 'messages' && parts[3] === 'ack') return reply(await service.acknowledge(session, { id: parts[2], expected_hash: body.hash }));
     if (req.method === 'POST' && parts[1] === 'messages' && parts[3] === 'seen') return reply(service.markSeen(session, parts[2]));

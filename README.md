@@ -79,6 +79,35 @@ A response must arrive within five minutes.
 Changed content or rules invalidate the open form.
 A revoked client permission also prevents approval.
 An unchanged approved note does not open another form after retries or restart.
+
+### Retry after an app failure before posting
+
+`a2anotes_retry_send` queues the same note under its current approval.
+Only a person or reviewer session can request this retry.
+An agent cannot use this tool to send a note.
+
+The retry requires these conditions:
+
+- The recorded failure occurred before posting.
+- The failure reports unavailable app controls.
+- The content hash still matches the approval.
+- The current policy still permits that approval.
+- The saved file bytes still match their hashes.
+- The connected sender still matches the note.
+- The saved native attempt does not show a post start or receipt.
+- The note has fewer than eight delivery attempts.
+
+Pass the note ID and `expected_hash` with a new `request_id`.
+Reuse that request ID when the same tool call loses its response.
+The service stores the retry request before it returns the note to the queue.
+It retains the message ID and saved progress.
+It does not reset the attempt count.
+Unknown failures and uncertain delivery cannot use this operation.
+Invalid credentials and changed policy cannot use it.
+
+The review page shows **Retry approved note** when the current checks permit retry.
+The Slack adapter waits up to 20 seconds for the selected native sender after navigation.
+If native sending stays unavailable, the adapter stops before composing or posting.
 Message text and tool arguments cannot supply the human decision.
 
 The client must advertise MCP form elicitation.
