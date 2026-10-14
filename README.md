@@ -189,11 +189,12 @@ It never repeats an uncertain post.
 The service retains its retry deadlines and attempt limit.
 The app transport does not use HTTP status codes or Slack method quotas.
 Existing queue records remain readable.
-Small attachments travel as encoded data in the original message.
-The adapter checks the original sender and message reference before it returns attachment bytes.
+Agent request data travels inline in the original message, with a 26,000-byte limit.
+Supporting files use the signed-in app's file control. Slack shows them as file attachments, with a 2 MiB limit per file.
+The adapter checks the original sender and message reference before it returns file bytes through the app.
 The protocol still checks each attachment hash.
 A complete app message must fit within 39,000 bytes.
-Larger attachments fail before posting.
+Draft creation, revision, and approval check these limits before posting.
 Older API file references cannot be downloaded through this connector.
 Old files remain in the local store.
 
@@ -315,7 +316,6 @@ That adapter rejects remote API endpoints and never runs in the normal service.
 ## Open items
 
 - Verify sends and reactions against the installed Slack app before release.
-- Add native app file controls for larger attachments.
 - Add recovery beyond messages available in the app.
 - Support workspace directory search through app controls.
 
