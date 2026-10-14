@@ -49,6 +49,7 @@ The app client permits these read methods:
 - `conversations.info`
 - `conversations.open`
 - `conversations.history`
+- `conversations.replies`
 - `users.info`
 - `users.list`
 - `files.info`
