@@ -1,131 +1,105 @@
-// Operates the signed-in app through a verified loopback CDP connection.
+// Reads Slack through the signed-in app without changing its window.
+// SlackAppConnection reads the account IDs. BackgroundConnection reads Slack records through the app's own API client.
 import WebSocket from 'ws';
 import { desktopURL, verifySlackDesktopEndpoint, DESKTOP_IDENTITY } from './slack-desktop.ts';
 import { TransportError } from './transport.ts';
 
-export interface AppMessage { channel: string; user: string; text: string; ts: string; thread_ts?: string; bot_id?: string; app_id?: string; subtype?: string; reactions: {name: string; users: string[]}[] }
+export interface AppMessage { channel: string; user: string; text: string; ts: string; thread_ts?: string; bot_id?: string; app_id?: string; subtype?: string; client_msg_id?: string; reactions: {name: string; users: string[]}[] }
 export interface AppPerson { id: string; name: string; realName: string; title: string; active: boolean }
-export interface AppSnapshot { team: string; user: string; channel?: string; threadTs?: string; peers: {id: string; user: string}[]; people: AppPerson[]; messages: AppMessage[]; editor: boolean; draft: string }
+export interface AppSnapshot { team: string; user: string; channel?: string; peers: {id: string; user: string}[]; people: AppPerson[]; messages: AppMessage[] }
+// None of these operations focus, navigate, type in, or click the Slack window.
 export interface AppConnection {
   snapshot(): Promise<AppSnapshot>;
+  // Selects a direct conversation for later checks and loads its recent records.
   navigate(channelOrUser: string): Promise<void>;
-  compose(text: string, threadTs?: string): Promise<void>;
-  submit(): Promise<void>;
-  react(ts: string, emoji: string): Promise<void>;
+  // Loads one exact message record into the snapshot.
+  message(channel: string, ts: string): Promise<void>;
+  // Loads recent records of more direct conversations. The selected conversation does not change.
+  load(channelsOrUsers: string[]): Promise<void>;
+  directory(): Promise<AppPerson[]>;
   close(): Promise<void>;
 }
+export type NativeRead = (method: string, args: Record<string, unknown>) => Promise<any>;
+// Direct conversation IDs do not change. Profiles expire after PROFILE_TTL_MS.
+export interface BackgroundCache { peers: Map<string, {id: string; user: string}>; people: Map<string, {person: AppPerson; at: number}>; directory?: {people: AppPerson[]; at: number} }
+export const PROFILE_TTL_MS = 10 * 60_000;
+const DIRECTORY_PAGES = 10;
 
-// Copy known fields only. Never return application state or credential objects.
-export function rendererSnapshot() {
-  const rows = [...document.querySelectorAll('[data-qa="message_container"], [data-qa="virtual-list-item"]')];
-  const people = new Map<string, any>(), peers = new Map<string, any>(), messages = new Map<string, any>();
-  const channel = /^\/client\/T[A-Z0-9]+\/(D[A-Z0-9]+)(?:\/|$)/.exec(location.pathname)?.[1];
-  function person(u: any) {
-    if (!u || !/^[UW][A-Z0-9]+$/.test(u.id)) return;
-    const p = u.profile || {};
-    people.set(u.id, {id: u.id, name: String(p.display_name || u.real_name || u.name || u.id),
-      realName: String(u.real_name || p.real_name || ''), title: String(p.title || ''), active: !u.deleted && !u.is_bot && !u.is_app_user});
+export class BackgroundConnection implements AppConnection {
+  private channel?: string;
+  private messages = new Map<string, AppMessage>();
+  constructor(private account: {identity(): Promise<{team: string; user: string}>; close(): Promise<void>}, private read: NativeRead,
+    private cache: BackgroundCache, private now: () => number = Date.now) {}
+  async snapshot(): Promise<AppSnapshot> {
+    const {team, user} = await this.account.identity();
+    // The name is optional. Background access can start after the account is bound.
+    await this.person(user).catch(() => {});
+    return {team, user, ...(this.channel ? {channel: this.channel} : {}), peers: [...this.cache.peers.values()],
+      people: [...this.cache.people.values()].map(p => p.person), messages: [...this.messages.values()]};
   }
-  function props(element: any, visit: (p: any, component?: string) => void) {
-    let f = element[Object.keys(element).find(k => k.startsWith('__reactFiber')) || ''];
-    for (let i = 0; f && i < 30; i++, f = f.return) if (f.memoizedProps) visit(f.memoizedProps, f.type?.displayName || f.type?.name);
-  }
-  for (const element of [...document.querySelectorAll('[data-qa], [data-user-id]')].slice(0, 5000)) props(element, (p, component) => {
-    person(p.user); person(p.member); person(p.currentUser); person(p.recipient);
-    if (component === 'BaseAvatar' && /^[UW][A-Z0-9]+$/.test(p.userId) && typeof p.memberOrBotName === 'string' &&
-        typeof p.isDeleted === 'boolean' && typeof p.userType === 'string') {
-      people.set(p.userId, {id:p.userId, name:p.memberOrBotName, realName:p.memberOrBotName, title:'',
-        active:p.userType === 'member' && !p.isDeleted && !p.botId && p.hasNoAccess !== true});
+  private async peer(id: string) {
+    if (/^D[A-Z0-9]+$/.test(id)) {
+      const known = this.cache.peers.get(id); if (known) return known;
+      const found = (await this.read('conversations.info', {channel: id}))?.channel;
+      if (found?.id !== id || found.is_im !== true || !/^[UW][A-Z0-9]+$/.test(found.user)) throw new TransportError('The Slack conversation is not a direct message.', true);
+      const peer = {id, user: found.user as string}; this.cache.peers.set(id, peer); return peer;
     }
-    const c = p.channel || p.conversation;
-    if (c && /^D[A-Z0-9]+$/.test(c.id) && c.is_im === true && /^[UW][A-Z0-9]+$/.test(c.user)) peers.set(c.id, {id: c.id, user: c.user});
-  });
-  for (const row of rows) props(row, (p, component) => {
-    const m = p.message || (component === 'Message' ? p.msg : undefined);
-    if (!m || !/^\d+\.\d+$/.test(m.ts) || !/^[UW][A-Z0-9]+$/.test(m.user) || typeof m.text !== 'string') return;
-    const c = typeof m.channel === 'string' ? m.channel : p.channel?.id || p.channelId || channel;
-    if (!/^D[A-Z0-9]+$/.test(c)) return;
-    messages.set(c + ':' + m.ts, {channel: c, user: m.user, text: m.text, ts: m.ts,
-      ...(m.thread_ts ? {thread_ts: m.thread_ts} : {}), ...(m.bot_id ? {bot_id: m.bot_id} : {}),
-      ...(m.app_id ? {app_id: m.app_id} : {}), ...(m.subtype ? {subtype: m.subtype} : {}),
-      reactions: (Array.isArray(m.reactions) ? m.reactions : []).map((r: any) => ({name: String(r.name), users: Array.isArray(r.users) ? r.users.filter((u: any) => typeof u === 'string') : []}))});
-  });
-  let threadTs: string | undefined;
-  const thread = document.querySelector('[data-qa="thread_view"]');
-  if (thread) props(thread, p => {const ts = p.threadTs || p.parentMessage?.ts || p.rootMessage?.ts; if (typeof ts === 'string' && /^\d+\.\d+$/.test(ts)) threadTs = ts;});
-  const editors = [...document.querySelectorAll<HTMLElement>('[data-qa="message_input"] [contenteditable="true"], [data-qa="message_input"][contenteditable="true"], [data-qa="msg_input"] [contenteditable="true"], .p-message_input_field[contenteditable="true"]')];
-  const visible = editors.filter(e => !!e.getClientRects().length);
-  const editor = visible.find(e => e === document.activeElement || e.contains(document.activeElement)) || (visible.length === 1 ? visible[0] : undefined);
-  return {channel, threadTs, people: [...people.values()], peers: [...peers.values()], messages: [...messages.values()], editor: !!editor, draft: editor?.innerText || ''};
+    if (!/^[UW][A-Z0-9]+$/.test(id)) throw new TransportError('The Slack destination ID is invalid.', true);
+    const known = [...this.cache.peers.values()].find(p => p.user === id); if (known) return known;
+    const found = (await this.read('conversations.open', {users: id, return_im: true}))?.channel;
+    if (!/^D[A-Z0-9]+$/.test(found?.id) || found.user && found.user !== id) throw new TransportError('Slack did not return the direct conversation for this member.', true);
+    const peer = {id: found.id as string, user: id}; this.cache.peers.set(peer.id, peer); return peer;
+  }
+  private async person(user: string) {
+    const known = this.cache.people.get(user);
+    if (known && this.now() - known.at < PROFILE_TTL_MS) return known.person;
+    const person = (await this.read('users.info', {user}))?.user as AppPerson | undefined;
+    if (person?.id !== user) throw new TransportError('Slack did not return this member profile.', true);
+    this.cache.people.set(user, {person, at: this.now()}); return person;
+  }
+  private async history(channel: string, args: Record<string, unknown>) {
+    const found = (await this.read('conversations.history', {channel, ...args}))?.messages;
+    if (!Array.isArray(found)) throw new TransportError('Slack did not return the conversation records.', false, 0, 'conversations.history');
+    for (const m of found) this.messages.set(channel + ':' + m.ts, {...m, channel});
+  }
+  async navigate(id: string) {
+    const peer = await this.peer(id);
+    await this.person(peer.user);
+    await this.history(peer.id, {limit: 50});
+    this.channel = peer.id;
+  }
+  async message(channel: string, ts: string) {
+    if (!/^\d+\.\d+$/.test(ts)) throw new TransportError('The Slack message timestamp is invalid.', true);
+    await this.peer(channel);
+    await this.history(channel, {limit: 1, latest: ts, oldest: ts, inclusive: true});
+  }
+  async load(ids: string[]) {
+    for (const id of ids) {
+      try { await this.history((await this.peer(id)).id, {limit: 50}); }
+      catch (error) {
+        // One closed or removed conversation does not stop the others. Limits and lost replies stop the scan.
+        if (!(error instanceof TransportError) || !error.definite || error.rateLimited) throw error;
+      }
+    }
+  }
+  async directory() {
+    if (this.cache.directory && this.now() - this.cache.directory.at < PROFILE_TTL_MS) return this.cache.directory.people;
+    const people: AppPerson[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < DIRECTORY_PAGES; page++) {
+      const found = await this.read('users.list', {limit: 200, ...(cursor ? {cursor} : {})});
+      for (const p of Array.isArray(found?.members) ? found.members : []) {people.push(p); this.cache.people.set(p.id, {person: p, at: this.now()});}
+      cursor = found?.next; if (!cursor) break;
+    }
+    this.cache.directory = {people, at: this.now()}; return people;
+  }
+  async close() { await this.account.close(); }
 }
 
-// All input enters as JSON data. It cannot become executable source.
-export function rendererAction(action: string, value: string, threadTs?: string, expectedChannel?: string, expectedDraft?: string) {
-  const channel = /^\/client\/T[A-Z0-9]+\/(D[A-Z0-9]+)(?:\/|$)/.exec(location.pathname)?.[1];
-  if (expectedChannel && channel !== expectedChannel) return false;
-  const rowFor = (ts: string) => [...document.querySelectorAll<HTMLElement>('[data-qa="message_container"], [data-qa="virtual-list-item"]')].find(row => {
-    let f = (row as any)[Object.keys(row).find(k => k.startsWith('__reactFiber')) || ''];
-    for (let i = 0; f && i < 30; i++, f = f.return) {
-      const component = f.type?.displayName || f.type?.name;
-      if (f.memoizedProps?.message?.ts === ts || component === 'Message' && f.memoizedProps?.msg?.ts === ts) return true;
-    }
-    return false;
-  });
-  if (action === 'focus') {
-    const region = threadTs ? document.querySelector('[data-qa="thread_view"]') : document;
-    const editors = region && [...region.querySelectorAll<HTMLElement>('[data-qa="message_input"] [contenteditable="true"], [data-qa="message_input"][contenteditable="true"], [data-qa="msg_input"] [contenteditable="true"], .p-message_input_field[contenteditable="true"]')].filter(e => !!e.getClientRects().length && (threadTs ? !!e.closest('[data-qa="thread_view"]') : !e.closest('[data-qa="thread_view"]')));
-    const editor = editors?.length === 1 ? editors[0] : undefined;
-    if (!editor || editor.innerText.trim()) return false;
-    editor.focus(); return true;
-  }
-  if (action === 'thread') {
-    const row = rowFor(value);
-    if (!row) return false;
-    row.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
-    const button = row.querySelector<HTMLElement>('[data-qa="message_reply_to_thread"], [data-qa="reply_to_thread"]');
-    if (!button) return false;
-    button.click(); return true;
-  }
-  if (action === 'reaction') {
-    const row = rowFor(value);
-    if (!row) return false;
-    row.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
-    const button = row.querySelector<HTMLElement>('[data-qa="message_add_reaction"], [data-qa="add_reaction"]');
-    if (!button) return false;
-    button.click(); return true;
-  }
-  if (action === 'emoji') {
-    const picker = document.querySelector('[data-qa="emoji_picker"], [data-qa="emoji-picker"], .p-emoji_picker');
-    if (!picker) return false;
-    let f = (picker as any)[Object.keys(picker).find(k => k.startsWith('__reactFiber')) || ''];
-    let matched = false;
-    for (let i = 0; f && i < 30; i++, f = f.return) {
-      const p = f.memoizedProps;
-      if (p?.message?.ts === threadTs || p?.messageTs === threadTs || p?.timestamp === threadTs) matched = true;
-    }
-    if (!matched) return false;
-    const button = [...picker.querySelectorAll<HTMLElement>('button, [role="button"]')].find(e => e.getAttribute('data-emoji-name') === value || e.getAttribute('aria-label') === value || e.getAttribute('aria-label') === ':' + value + ':');
-    if (!button) return false;
-    button.click(); return true;
-  }
-  if (action === 'submit') {
-    const region = threadTs ? document.querySelector('[data-qa="thread_view"]') : document;
-    const editor = document.activeElement as HTMLElement | null;
-    if (!editor?.isContentEditable || editor.innerText !== expectedDraft || (threadTs ? !editor.closest('[data-qa="thread_view"]') : editor.closest('[data-qa="thread_view"]'))) return false;
-    const buttons = [...(region?.querySelectorAll<HTMLButtonElement>('[data-qa="texty_send_button"], [data-qa="send_button"]') || [])].filter(e => !!e.getClientRects().length && (threadTs ? !!e.closest('[data-qa="thread_view"]') : !e.closest('[data-qa="thread_view"]')));
-    const button = buttons.length === 1 ? buttons[0] : undefined;
-    if (!button || button.disabled || !button.getClientRects().length) return false;
-    button.click(); return true;
-  }
-  return false;
-}
-
-export class SlackAppConnection implements AppConnection {
+// Reads the account IDs through a verified loopback CDP connection.
+export class SlackAppConnection {
   private sequence = 0;
   private pending = new Map<number, {resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>}>();
-  private threadTs?: string;
-  private expectedChannel?: string;
-  private expectedDraft?: string;
   private constructor(private socket: WebSocket, private team: string, private user?: string) {
     socket.on('message', raw => {
       let m: any; try {m = JSON.parse(raw.toString());} catch {return;}
@@ -158,7 +132,7 @@ export class SlackAppConnection implements AppConnection {
     const connection = new SlackAppConnection(socket, team, user);
     try {
       await new Promise<void>((resolve, reject) => {socket.once('open', resolve); socket.once('error', reject);});
-      await connection.snapshot(); return connection;
+      await connection.identity(); return connection;
     } catch (error) {socket.terminate(); throw error;}
   }
   private request(method: string, params: Record<string, unknown>) {
@@ -170,47 +144,15 @@ export class SlackAppConnection implements AppConnection {
     });
   }
   private async evaluate(expression: string) {return (await this.request('Runtime.evaluate', {expression, returnByValue: true})).result?.value;}
-  private async account() {
+  // Reads only the workspace and member IDs. It does not read or change the open conversation.
+  async identity() {
     const found = await this.evaluate(DESKTOP_IDENTITY);
     if (found?.team && found.team !== this.team || /^[UW][A-Z0-9]+$/.test(found?.user) && this.user && found.user !== this.user)
       throw new TransportError('The Slack app account differs from the saved account. No action was taken.', true);
     if (found?.team !== this.team || !/^[UW][A-Z0-9]+$/.test(found?.user))
       throw new TransportError('The Slack app account is still loading.', false, 1, 'slack.desktop');
     this.user ||= found.user;
-    return found;
+    return {team: found.team as string, user: found.user as string};
   }
-  async snapshot(): Promise<AppSnapshot> {
-    const found = await this.account();
-    const value = await this.evaluate(`(() => { const __name = f => f; return (${rendererSnapshot.toString()})(); })()`);
-    await this.account();
-    if (!value || !Array.isArray(value.messages) || value.messages.length > 2000 || !Array.isArray(value.peers) || !Array.isArray(value.people)) throw new TransportError('The Slack app message view could not be checked.', true);
-    return {...value, ...found};
-  }
-  async navigate(id: string) {
-    if (!/^[DUW][A-Z0-9]+$/.test(id)) throw new TransportError('The Slack destination ID is invalid.', true);
-    await this.account();
-    await this.request('Page.navigate', {url: `https://app.slack.com/client/${this.team}/${id}`});
-  }
-  private async action(action: string, value: string, thread?: string) {
-    await this.account();
-    const expression = `(() => { const __name = f => f; return (${rendererAction.toString()})(${JSON.stringify(action)},${JSON.stringify(value)},${JSON.stringify(thread)},${JSON.stringify(this.expectedChannel)},${JSON.stringify(this.expectedDraft)}); })()`;
-    if (!await this.evaluate(expression)) throw new TransportError('The Slack app control is unavailable. No action was confirmed.', true,
-      0, 'slack.desktop', undefined, undefined, 'app_control_unavailable');
-  }
-  async compose(text: string, threadTs?: string) {
-    this.expectedChannel = (await this.snapshot()).channel;
-    this.expectedDraft = text;
-    this.threadTs = threadTs;
-    if (threadTs) {
-      await this.action('thread', threadTs);
-      let matched = false;
-      for (let i = 0; i < 30; i++) {if ((await this.snapshot()).threadTs === threadTs) {matched = true; break;} await new Promise(r => setTimeout(r, 100));}
-      if (!matched) throw new TransportError('The Slack app did not show the requested thread.', true);
-    }
-    await this.action('focus', '', threadTs);
-    await this.account(); await this.request('Input.insertText', {text});
-  }
-  async submit() {await this.action('submit', '', this.threadTs);}
-  async react(ts: string, emoji: string) {this.expectedChannel = (await this.snapshot()).channel; await this.action('reaction', ts); await this.action('emoji', emoji, ts);}
   async close() {this.socket.close();}
 }

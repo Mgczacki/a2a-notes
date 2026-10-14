@@ -3,9 +3,8 @@ import assert from 'node:assert/strict';
 import {mkdtempSync, readFileSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {runInNewContext} from 'node:vm';
 import {SlackTransport} from '../src/slack.ts';
-import {rendererSnapshot, rendererAction, type AppConnection, type AppSnapshot} from '../src/slack-app.ts';
+import {type AppConnection, type AppSnapshot} from '../src/slack-app.ts';
 import {NotesService} from '../src/service.ts';
 import {Store} from '../src/store.ts';
 import {person, agent, reviewer} from './helpers.ts';
@@ -20,30 +19,38 @@ import {createMcpServer} from '../src/mcp.ts';
 
 function fixture(options: {waitTimeoutMs?: number} = {}) {
   const s: AppSnapshot = {team:'TEXAMPLE', user:'UMARIO01', channel:'DOTHER01', peers:[{id:'DOTHER01',user:'UALEX01'},{id:'DSELF01',user:'UMARIO01'}],
-    people:[{id:'UMARIO01',name:'Mario',realName:'Mario',title:'',active:true},{id:'UALEX01',name:'Alex',realName:'Alex',title:'',active:true}], messages:[], editor:true,draft:''};
+    people:[{id:'UMARIO01',name:'Mario',realName:'Mario',title:'',active:true},{id:'UALEX01',name:'Alex',realName:'Alex',title:'',active:true}], messages:[]};
+  // calls records Slack writes. Conversation selection is internal and is not a Slack window action.
   const calls: string[] = [];
   const app: AppConnection = {
-    async snapshot() {return structuredClone(s);}, async navigate(id) {calls.push('navigate:'+id); s.channel = s.peers.find(p => p.id === id || p.user === id)?.id;},
-    async compose(text) {calls.push('compose'); s.draft = text;},
-    async submit() {calls.push('submit'); s.messages.push({channel:s.channel!,user:s.user,text:s.draft,ts:'1791935000.001',reactions:[]}); s.draft='';},
-    async react(ts, name) {calls.push('react:'+ts); s.messages.find(m => m.ts === ts)!.reactions.push({name,users:[s.user]});}, async close() {},
+    async snapshot() {return structuredClone(s);},
+    async navigate(id) {const peer = s.peers.find(p => p.id === id || p.user === id); if (!peer) throw new TransportError('Slack Desktop: user_not_found',true); s.channel = peer.id;},
+    async message() {}, async load() {}, async directory() {return structuredClone(s.people);}, async close() {},
   };
   const file = join(mkdtempSync(join(tmpdir(),'app-transport-')), 'account.json');
   const transport = new SlackTransport(file,{teamId:s.team},undefined,{open:async () => app,...options});
+  let sequence = 0;
+  const next = () => `1791935000.${String(++sequence).padStart(3,'0')}`;
+  transport.desktopSender = {canSend:()=>true, canRead:()=>true,
+    post:async (input,before) => {before(); calls.push('post'); const ts=next(); s.messages.push({channel:input.channel,user:s.user,text:input.text,ts,client_msg_id:input.messageId,reactions:[]}); return {channel:input.channel,ts};},
+    react:async input => {calls.push('react:'+input.ts); s.messages.find(m => m.ts === input.ts)!.reactions.push({name:input.name,users:[s.user]});},
+    notice:async input => {calls.push('notice'); const ts=next(); s.messages.push({channel:input.channel,user:s.user,text:input.text,ts,client_msg_id:input.operationId,reactions:[]}); return {channel:input.channel,ts};}};
   return {s,app,calls,file,transport};
 }
 const message = {channel:'DOTHER01', user:'UALEX01',text:'A2A #7\nPlease read this.',ts:'1791934900.001',reactions:[]};
 
 async function stoppedNote(t: any, withFile = false) {
-  const f = fixture(); await f.transport.connect();
+  const f = fixture({waitTimeoutMs:5}); await f.transport.connect();
   const service = new NotesService({store:new Store(join(f.file,'..')),transport:f.transport,scanIntervalMs:0,retryIntervalMs:0});
   t.after(() => service.stop());
   const file = withFile ? service.stageFile(person,{name:'plan.txt',text:'Approved attachment',sha256:sha256(Buffer.from('Approved attachment')),request_id:randomUUID()}) : undefined;
   const d = await service.createDraft(person,{to_address:'slack:TEXAMPLE:UALEX01',subject:'Read the plan',body:'Please read the plan.',audience:'person',
     ...(file ? {file_ids:[file.file_id]} : {}),request_id:randomUUID()});
   service.approve(person,{id:d.id,expected_hash:d.hash,decision:'approve'});
-  f.app.compose = async () => {throw new TransportError('The Slack app control is unavailable. No action was confirmed.',true);};
-  await assert.rejects(service.send(person,{id:d.id,expected_hash:d.hash,request_id:randomUUID()}),/No action was confirmed/);
+  const sender = f.transport.desktopSender!;
+  f.transport.desktopSender = {...sender, canSend:()=>false};
+  await assert.rejects(service.send(person,{id:d.id,expected_hash:d.hash,request_id:randomUUID()}),/No post was started/);
+  f.transport.desktopSender = sender;
   assert.equal(service.store.note(d.id)!.state,'permanent_failure');
   assert.equal(service.store.note(d.id)!.checkpoint?.postStarted,undefined);
   return {...f,service,d,attachment:file};
@@ -118,7 +125,7 @@ for (const change of ['agent','hash','content','policy','credentials','started',
     if(change==='started')f.service.store.update(f.d.id,n=>{n.checkpoint!.postStarted=true;});
     if(change==='uncertain')f.service.store.update(f.d.id,n=>{n.delivery!.uncertain=true;});
     if(change==='exhausted')f.service.store.update(f.d.id,n=>{n.delivery!.attempts=8;});
-    if(change==='invalid_auth')f.service.store.update(f.d.id,n=>{n.error='Slack Desktop: invalid_auth';});
+    if(change==='invalid_auth')f.service.store.update(f.d.id,n=>{n.error='Slack Desktop: invalid_auth';n.delivery!.failureCode='transport_error';});
     if(change==='file_progress')f.service.store.update(f.d.id,n=>{n.checkpoint!.uploads.old={fileId:'FOLD01',url:'slack-app:inline',phase:'complete'};});
     await assert.rejects(f.service.retrySend(change==='agent'?agent:person,{id:f.d.id,expected_hash:change==='hash'?'old':f.d.hash,request_id:randomUUID()}));
     assert.equal(f.service.store.note(f.d.id)!.state,'permanent_failure');
@@ -158,11 +165,11 @@ test('a reviewer can retry under a current human approval but request IDs cannot
   assert.equal((await f.service.retrySend(reviewer,{id:f.d.id,expected_hash:f.d.hash,request_id:randomUUID()})).state,'queued');
 });
 
-test('navigation waits for native readiness and never chooses composer during recovery',async()=>{
+test('a send waits for native readiness and keeps the Slack window conversation',async()=>{
   const f=fixture();await f.transport.connect();f.s.channel='DSELF01';let polls=0,posts=0;
   f.transport.desktopSender={canSend:()=>++polls>=3,post:async(input,before)=>{before();posts++;return {channel:input.channel,ts:'1791935000.022'};}};
   await f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:randomUUID(),files:[],wire:()=> 'A2ANotes/1',display:{subject:'Plan',body:'Please read.',audience:'person',senderName:'Mario',files:[]}});
-  assert.equal(posts,1);assert.deepEqual(f.calls,['navigate:DOTHER01']);
+  assert.equal(posts,1);assert.deepEqual(f.calls,[]);
 });
 
 test('a selected native sender that stays unavailable stops before composing or posting',async()=>{
@@ -240,14 +247,33 @@ test('native app receipt survives restart and keeps inline files without another
   f.s.user='UEVE01';await assert.rejects(restarted.findSent(input.to,id),/differs/);
 });
 
-test('only known native unavailability permits app composer fallback', async () => {
+test('native unavailability or a disabled sender stops before posting without window controls', async () => {
   const f=fixture();await f.transport.connect();
   const input={to:'slack:TEXAMPLE:UALEX01',messageId:randomUUID(),display:{subject:'Plan',body:'Please read.',audience:'person' as const,senderName:'Mario',files:[]},files:[],wire:()=> 'A2ANotes/1\nID: test'};
   f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new TransportError('invalid_auth',true);}};
-  await assert.rejects(f.transport.send(input),/invalid_auth/);assert.ok(!f.calls.includes('compose'));
+  await assert.rejects(f.transport.send(input),/invalid_auth/);
+  let checkpoint:any;
   f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new DesktopUnavailableError();}};
-  input.wire=()=>`A2ANotes/1\nID: ${input.messageId}`;
-  await f.transport.send(input);assert.equal(f.calls.filter(c=>c==='submit').length,1);
+  await assert.rejects(f.transport.send({...input,saveCheckpoint:c=>{checkpoint=structuredClone(c);}}),(e:any)=>e.failureCode==='app_control_unavailable'&&e.definite);
+  assert.equal(checkpoint.postStarted,false);
+  f.transport.desktopSender={canSend:()=>true,status:()=>({sendEnabled:false} as any),post:async()=>{throw new Error('Must not post');}};
+  await assert.rejects(f.transport.send(input),/sending is turned off/);
+  f.transport.desktopSender=undefined;
+  await assert.rejects(f.transport.send(input),/sending is turned off/);
+  assert.deepEqual(f.calls,[]);
+});
+
+test('a lost read before posting returns the note to the queue',async t=>{
+  const f=fixture();await f.transport.connect();
+  const service=new NotesService({store:new Store(join(f.file,'..')),transport:f.transport,scanIntervalMs:0,retryIntervalMs:0});
+  t.after(()=>service.stop());
+  const draft=await service.createDraft(person,{to_address:'slack:TEXAMPLE:UALEX01',subject:'Read the plan',body:'Please read the plan.',audience:'person',request_id:randomUUID()});
+  service.approve(person,{id:draft.id,expected_hash:draft.hash,decision:'approve'});
+  const navigate=f.app.navigate;
+  f.app.navigate=async()=>{throw new TransportError('Slack did not return the conversation records.',false,0,'conversations.history');};
+  await assert.rejects(service.send(person,{id:draft.id,expected_hash:draft.hash,request_id:randomUUID()}));
+  assert.equal(service.store.note(draft.id)!.state,'queued');assert.equal(service.store.note(draft.id)!.delivery!.uncertain,false);
+  f.app.navigate=navigate;
 });
 
 test('API upload progress cannot become a second attachment through the app adapter', async () => {
@@ -259,23 +285,21 @@ test('API upload progress cannot become a second attachment through the app adap
   assert.equal(native,0);assert.deepEqual(f.calls,[]);
 });
 
-test('recipient lookup uses its verified DM and waits for the account after navigation', async () => {
+test('recipient lookup selects its verified DM and waits for the account', async () => {
   const f=fixture();await f.transport.connect();f.s.channel=undefined;let loading=0;
-  f.app.navigate=async id=>{assert.equal(id,'DOTHER01');f.calls.push('navigate:'+id);f.s.channel=id;loading=2;};
+  const navigate=f.app.navigate;
+  f.app.navigate=async id=>{f.calls.push('select:'+id);await navigate(id);loading=2;};
   f.app.snapshot=async()=>{if(loading-->0)throw new TransportError('The Slack app account is still loading.',false,1,'slack.desktop');return structuredClone(f.s);};
   const recipient=await f.transport.checkRecipient('slack:TEXAMPLE:UALEX01');
-  assert.equal(recipient.name,'Alex');assert.deepEqual(f.calls,['navigate:DOTHER01']);
-  await assert.rejects(f.transport.checkRecipient('slack:TEXAMPLE:UNEW01'),/verify its recipient/);
+  assert.equal(recipient.name,'Alex');assert.deepEqual(f.calls,['select:UALEX01']);
+  await assert.rejects(f.transport.checkRecipient('slack:TEXAMPLE:UNEW01'),/user_not_found/);
 });
 
-test('live avatar fields provide verified names and exclude deleted or automated users', () => {
-  const avatar=(id:string,type:string,deleted=false)=>({__reactFiberTest:{type:{displayName:'BaseAvatar'},memoizedProps:{userId:id,memberOrBotName:'Member '+id,userType:type,isDeleted:deleted,access:'private'}}});
-  const elements=[avatar('UALEX01','member'),avatar('UMARIO01','member'),avatar('UBOT01','bot'),avatar('UDELETED01','member',true)];
-  const result=runInNewContext(`(${rendererSnapshot.toString()})()`,{__name:(f:unknown)=>f,location:{pathname:'/client/TEXAMPLE/DOTHER01'},document:{querySelector:()=>null,querySelectorAll:(q:string)=>q.includes('contenteditable')?[]:elements}});
-  assert.equal(result.people.find((p:any)=>p.id==='UALEX01').active,true);
-  assert.equal(result.people.find((p:any)=>p.id==='UBOT01').active,false);
-  assert.equal(result.people.find((p:any)=>p.id==='UDELETED01').active,false);
-  assert.ok(!JSON.stringify(result).includes('private'));
+test('people search uses the background directory and returns active members only', async () => {
+  const f=fixture();await f.transport.connect();
+  f.s.people.push({id:'UBOT01',name:'Alex bot',realName:'Alex bot',title:'',active:false});
+  const found=await f.transport.findPeople('alex',10);
+  assert.deepEqual(found.people.map(p=>p.address),['slack:TEXAMPLE:UALEX01']);
 });
 
 test('refresh updates the name without changing the bound sender', async () => {
@@ -306,9 +330,9 @@ test('a reaction from another account does not acknowledge for the recipient', a
   const f=fixture(); await f.transport.connect(); f.s.messages.push({...structuredClone(message),reactions:[{name:'white_check_mark',users:['UALEX01']}]});
   await f.transport.acknowledge({channel:message.channel,ts:message.ts}); assert.equal(f.calls.filter(c => c.startsWith('react:')).length,1);
 });
-test('native receipt uses the verified original timestamp without composer controls',async()=>{
+test('native receipt uses the verified original timestamp without window controls',async()=>{
   const f=fixture();await f.transport.connect();f.s.messages.push(structuredClone(message));let calls=0;
-  f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new Error('No message post permitted');},react:async(input)=>{
+  f.transport.desktopSender={canSend:()=>true,canRead:()=>true,post:async()=>{throw new Error('No message post permitted');},react:async(input)=>{
     calls++;assert.equal(input.ts,message.ts);assert.equal(input.channel,message.channel);assert.equal(input.owner,f.s.user);
   }};
   await f.transport.acknowledge({channel:message.channel,ts:message.ts});
@@ -317,33 +341,34 @@ test('native receipt uses the verified original timestamp without composer contr
   await assert.rejects(f.transport.acknowledge({channel:message.channel,ts:message.ts}),(e:any)=>e.method==='reactions.add'&&e.status===429);
   assert.deepEqual(f.calls,[]);
 });
-test('text send saves its checkpoint before clicking and confirms the original message ID', async () => {
+test('text send saves its checkpoint before posting and confirms the original message ID', async () => {
   const f=fixture(); await f.transport.connect(); let checkpoint:any;
-  f.app.submit=async () => {assert.equal(checkpoint.postStarted,true); f.calls.push('submit'); f.s.messages.push({channel:f.s.channel!,user:f.s.user,text:f.s.draft,ts:'1791935000.002',reactions:[]});f.s.draft='';};
+  const post=f.transport.desktopSender!.post;
+  f.transport.desktopSender!.post=async (input,before) => post(input,()=>{before();assert.equal(checkpoint.postStarted,true);});
   const result=await f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:'123',display:{subject:'Plan',body:'Please read.',audience:'person',senderName:'Mario',files:[]},files:[],wire:()=> 'A2ANotes/1\nID: 123\nBody:\nHi @channel',saveCheckpoint:c=>{checkpoint=structuredClone(c);}});
-  assert.equal(result.ts,'1791935000.002'); assert.equal(f.calls.filter(c=>c==='submit').length,1);
+  assert.equal(result.ts,'1791935000.001'); assert.equal(f.calls.filter(c=>c==='post').length,1);
   assert.ok(!f.s.messages[0].text.includes('@channel'));
   assert.ok(f.s.messages[0].text.includes('Please read.'));
   const {desktopEvent} = await import('../src/slack-desktop.ts');
   assert.ok(desktopEvent({...f.s.messages[0],type:'message'}));
   assert.equal((await f.transport.findSent('slack:TEXAMPLE:UALEX01','123'))?.ts,result.ts);
 });
-test('existing drafts and attachments fail before composing or submitting', async () => {
+test('oversized attachments fail before posting', async () => {
   const f=fixture(); await f.transport.connect(); const input={to:'slack:TEXAMPLE:UALEX01',messageId:'123',display:{subject:'Plan',body:'Text',audience:'person' as const,senderName:'Mario',files:[]},files:[],wire:()=> 'A2ANotes/1\nID: 123'};
-  f.s.draft='Private draft'; await assert.rejects(f.transport.send(input),/contains a draft/);
   await assert.rejects(f.transport.send({...input,files:[{id:'x',name:'x.txt',bytes:Buffer.alloc(40_000)}]}),/exceed the app text limit/);
-  assert.ok(!f.calls.includes('compose')); assert.ok(!f.calls.includes('submit')); assert.equal(f.s.draft,'Private draft');
+  assert.deepEqual(f.calls,[]);
 });
-test('lost submit response can be reconciled without another post', async () => {
-  const f=fixture(); await f.transport.connect(); f.app.submit=async()=>{f.calls.push('submit'); f.s.messages.push({channel:f.s.channel!,user:f.s.user,text:f.s.draft,ts:'1791935000.003',reactions:[]}); throw new Error('Lost response');};
+test('lost post response can be reconciled without another post', async () => {
+  const f=fixture(); await f.transport.connect(); const post=f.transport.desktopSender!.post;
+  f.transport.desktopSender!.post=async (input,before)=>{await post(input,before); throw new TransportError('Lost response',false);};
   await assert.rejects(f.transport.send({to:'slack:TEXAMPLE:UALEX01',messageId:'123',display:{subject:'Plan',body:'Text',audience:'person',senderName:'Mario',files:[]},files:[],wire:()=> 'A2ANotes/1\nID: 123'}),/Lost response/);
-  assert.equal((await f.transport.findSent('slack:TEXAMPLE:UALEX01','123'))?.ts,'1791935000.003'); assert.equal(f.calls.filter(c=>c==='submit').length,1);
+  assert.equal((await f.transport.findSent('slack:TEXAMPLE:UALEX01','123'))?.ts,'1791935000.001'); assert.equal(f.calls.filter(c=>c==='post').length,1);
   await assert.rejects(f.transport.findSent('slack:TEXAMPLE:UALEX01','missing'),/No duplicate/);
 });
 test('delivery notices reconcile by saved operation ID and never become incoming instructions', async () => {
   const f=fixture(); await f.transport.connect(); const ref={channel:'DOTHER01',operation_id:'12345678-1234-1234-1234-123456789abc'};
   await f.transport.notifyDelivery(ref,'unassigned'); await f.transport.notifyDelivery({...ref,reconcile:'true'},'unassigned');
-  assert.equal(f.calls.filter(c=>c==='submit').length,1);
+  assert.equal(f.calls.filter(c=>c==='notice').length,1);
   let incoming=0; await f.transport.scan({},async()=>{incoming++;},()=>{}); assert.equal(incoming,0);
   await assert.rejects(f.transport.notifyDelivery({...ref,operation_id:'12345678-1234-1234-1234-123456789def',reconcile:'true'},'unassigned'),/No duplicate/);
 });
@@ -357,33 +382,6 @@ test('app scan accepts explicit human input only and can load older messages wit
   await f.transport.scan({},m=>service.receive(m),()=>{}); assert.equal(service.list(person,{direction:'incoming'}).messages.length,1);
   await service.stop();
 });
-test('renderer copies known message and profile fields without exposing unrelated props', () => {
-  const element={__reactFiberTest:{memoizedProps:{message:{...message,access:'secret'},channel:{id:'DOTHER01',is_im:true,user:'UALEX01'},user:{id:'UALEX01',name:'Alex',profile:{token:'secret'}}}}};
-  const result=runInNewContext(`(${rendererSnapshot.toString()})()`,{__name:(f:unknown)=>f,location:{pathname:'/client/TEXAMPLE/DOTHER01'},document:{querySelector:()=>null,querySelectorAll:(q:string)=>q.includes('contenteditable')?[]:[element]}});
-  assert.equal(result.messages.length,1); assert.equal(result.peers[0].user,'UALEX01'); assert.ok(!JSON.stringify(result).includes('secret'));
-});
-test('the live Message component supplies msg records with bounded fields',()=>{
-  const record={...message,thread_ts:'1791934800.001',reactions:[{name:'white_check_mark',users:['UMARIO01'],private:'secret'}],__meta__:{access:'secret'}};
-  const row={__reactFiberTest:{type:{displayName:'Message'},memoizedProps:{msg:record,channelId:'DOTHER01',private:'secret'}}};
-  const unrelated={__reactFiberTest:{type:{displayName:'Unrelated'},memoizedProps:{msg:{...record,ts:'1791934900.009'}}}};
-  const otherChannel={__reactFiberTest:{type:{displayName:'Message'},memoizedProps:{msg:{...record,channel:'COTHER01',ts:'1791934900.010'}}}};
-  const result=runInNewContext(`(${rendererSnapshot.toString()})()`,{__name:(f:unknown)=>f,location:{pathname:'/client/TEXAMPLE/DOTHER01'},document:{querySelector:()=>null,querySelectorAll:(q:string)=>q.includes('contenteditable')?[]:[row,unrelated,otherChannel]}});
-  assert.equal(result.messages.length,1);assert.equal(result.messages[0].ts,message.ts);assert.equal(result.messages[0].user,message.user);
-  assert.equal(result.messages[0].text,message.text);assert.equal(result.messages[0].thread_ts,record.thread_ts);
-  assert.equal(result.messages[0].reactions[0].users[0],'UMARIO01');assert.ok(!JSON.stringify(result).includes('secret'));
-});
-test('reaction controls match the saved timestamp in current Message props',()=>{
-  let clicks=0;
-  const row={__reactFiberTest:{type:{displayName:'Message'},memoizedProps:{msg:message}},dispatchEvent:()=>{},querySelector:()=>({click:()=>{clicks++;}})};
-  const run=(ts:string)=>runInNewContext(`(${rendererAction.toString()})('reaction',${JSON.stringify(ts)},undefined,'DOTHER01')`,{__name:(f:unknown)=>f,MouseEvent:class{},location:{pathname:'/client/TEXAMPLE/DOTHER01'},document:{querySelectorAll:()=>[row]}});
-  assert.equal(run('1791934900.009'),false);assert.equal(clicks,0);
-  assert.equal(run(message.ts),true);assert.equal(clicks,1);
-});
-test('submit refuses a changed channel before it clicks a control', () => {
-  const result=runInNewContext(`(${rendererAction.toString()})('submit','',undefined,'DOTHER01','approved text')`,{location:{pathname:'/client/TEXAMPLE/DWRONG01'},document:{querySelectorAll:()=>{throw new Error('No control may be read');}}});
-  assert.equal(result,false);
-});
-
 test('disconnect persists across restart and requires an explicit connection', async () => {
   const f=fixture(); await f.transport.connect(); f.transport.disconnect();
   const next=new SlackTransport(f.file,{teamId:f.s.team},undefined,{open:async()=>f.app});

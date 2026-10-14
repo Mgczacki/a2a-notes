@@ -10,6 +10,7 @@ import { SlackDesktopHook, desktopURL, desktopEvent, DESKTOP_IDENTITY } from '..
 import { TransportError } from '../src/transport.ts';
 import { fakeWorkspace, personService, person, agent, MARIO, ALEX, rid } from './helpers.ts';
 import { encode } from '../src/protocol.ts';
+import { NATIVE_FUNCTIONS } from '../src/slack-desktop-native.ts';
 import { slackText } from '../src/slack-format.ts';
 
 test('the renderer identity reads the account button and returns only account IDs', () => {
@@ -84,8 +85,10 @@ test('native owner events use the current service checks and deduplicate with po
   await wait(() => hook.status().listening); remote.event({ ...event, channel, ts });
   await wait(() => hook.status().pending === 0); await owner.service.scanNow();
   assert.equal(owner.service.list(person, { direction: 'incoming' }).messages.length, 1);
-  assert.ok(remote.calls.every(m => ['Network.enable', 'Runtime.evaluate'].includes(m.method)));
-  assert.ok(remote.calls.filter(m => m.method === 'Runtime.evaluate').every(m => m.params.expression === DESKTOP_IDENTITY));
+  // Without sending, the hook listens, checks the account, and checks background read readiness only.
+  assert.ok(remote.calls.every(m => ['Network.enable', 'Runtime.enable', 'Runtime.evaluate', 'Runtime.callFunctionOn'].includes(m.method)));
+  assert.ok(remote.calls.filter(m => m.method === 'Runtime.evaluate').every(m => [DESKTOP_IDENTITY, 'globalThis'].includes(m.params.expression)));
+  assert.ok(remote.calls.filter(m => m.method === 'Runtime.callFunctionOn').every(m => m.params.functionDeclaration === NATIVE_FUNCTIONS.capability));
   assert.ok(!readFileSync(join(dir, 'desktop-events.json'), 'utf8').includes('private'));
 });
 

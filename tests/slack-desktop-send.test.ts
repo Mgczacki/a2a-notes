@@ -26,6 +26,11 @@ function nativeFixture(mode = 'success') {
     if (mode === 'policy') return Promise.reject({status:200,data:{error:6}});
     if (mode === 'lost') return Promise.reject({status:0,message:'private',args:request.args});
     if (mode === 'already') return Promise.reject({status:200,data:{error:'already_reacted',token:'private'}});
+    if (request.method === 'conversations.history') return Promise.resolve({ok:true,token:'private',messages:[
+      {user:ALEX,text:'A2A Reply/1 x',ts:'100.0002',client_msg_id:randomUUID(),reactions:[{name:'eyes',users:[MARIO,'private'],extra:'private'}],files:[{url_private:'private'}]},
+      {user:ALEX,text:'No timestamp'}]});
+    if (request.method === 'users.info') return Promise.resolve({ok:true,user:{id:request.args.user,name:'alex',real_name:'Alex',is_bot:request.args.user!==ALEX,profile:{title:'Engineer',email:'private'}}});
+    if (request.method === 'conversations.open') return Promise.resolve({ok:true,channel:{id:'DALEX',is_im:true,user:request.args.users,last_read:'private'}});
     return Promise.resolve({ok:true,channel:request.args.channel,ts:'100.0001',message:{client_msg_id:request.args.client_msg_id},token:'private'});
   }};
   const original = queue.q;
@@ -249,4 +254,48 @@ test('a native echo confirms an uncertain CDP send after restart without another
   owner.service.store.update(d.id,n=>{n.delivery!.nextAttemptAt=new Date(0).toISOString();});await owner.service.processQueue();
   assert.equal(owner.service.get(person,d.id).state,'sent');assert.equal(remote.posts.length,1);assert.equal(fake.calls.get('chat.postMessage')||0,0);
   assert.equal(fake.calls.get('conversations.history')||0,0);assert.equal(owner.service.list(person,{direction:'incoming'}).messages.length,0);
+});
+
+const read=(method:string,args:Record<string,unknown>)=>({team:'TEXAMPLE',owner:MARIO,method,args});
+test('native reads copy only known record fields and use no window controls',async()=>{
+  const f=nativeFixture();
+  const call=async(method:string,args:Record<string,unknown>)=>JSON.parse(JSON.stringify(await f.invoke(read(method,args) as any,f.functions.read)));
+  const history=await call('conversations.history',{channel:'DTEST',limit:50});
+  assert.equal(history.ok,true);assert.equal(history.data.messages.length,1);
+  assert.deepEqual(history.data.messages[0].reactions,[{name:'eyes',users:[MARIO]}]);
+  assert.ok(!JSON.stringify(history).includes('private'));
+  const member=await call('users.info',{user:ALEX});
+  assert.deepEqual(member.data.user,{id:ALEX,name:'Alex',realName:'Alex',title:'Engineer',active:true});
+  assert.equal((await call('users.info',{user:'UBOT'})).data.user.active,false);
+  const open=await call('conversations.open',{users:ALEX,return_im:true});
+  assert.deepEqual(open.data.channel,{id:'DALEX',is_im:true,user:ALEX});
+  assert.deepEqual(f.calls.map(c=>c.method),['conversations.history','users.info','users.info','conversations.open']);
+});
+test('native reads refuse write methods, extra arguments, and other conversation types',async()=>{
+  for(const [method,args] of [['chat.postMessage',{channel:'DTEST',text:'x'}],['chat.delete',{channel:'DTEST',ts:'1.2'}],
+    ['conversations.history',{channel:'CPUBLIC',limit:5}],['conversations.history',{channel:'DTEST',limit:500}],
+    ['conversations.history',{channel:'DTEST',limit:5,token:'x'}],['conversations.open',{users:ALEX}],['users.list',{limit:10,cursor:'<bad>'}]] as const){
+    const f=nativeFixture();const result=await f.invoke(read(method,args as any) as any,f.functions.read);
+    assert.equal(result.error,'native_invalid_payload');assert.equal(f.calls.length,0);
+  }
+  const f=nativeFixture();
+  assert.equal((await f.invoke({...read('users.info',{user:ALEX}),owner:ALEX} as any,f.functions.read)).error,'native_account_mismatch');
+  assert.equal(f.calls.length,0);
+});
+test('native reads report Retry-After without request data',async()=>{
+  const f=nativeFixture('429'),result=await f.invoke(read('conversations.history',{channel:'DTEST',limit:5}) as any,f.functions.read);
+  assert.equal(result.status,429);assert.equal(result.retryAfter,180);assert.equal(result.definite,true);
+  assert.ok(!JSON.stringify(result).includes('private'));
+});
+const notice=(text?:string):DesktopPost=>{const id=randomUUID();return {kind:'notice',team:'TEXAMPLE',owner:MARIO,to:'',channel:'DTEST',messageId:id,
+  text:text??`The agent received your message. This does not mean completed work.\nReceipt ID: ${id}`,blocks:''};};
+test('native delivery notices post fixed text once with the operation ID',async()=>{
+  const f=nativeFixture(),p=notice(),result=await f.invoke(p);
+  assert.equal(result.ok,true);assert.equal(f.calls.length,1);assert.equal(f.calls[0].attempts,1);
+  assert.equal(f.calls[0].args.client_msg_id,p.messageId);assert.equal(f.calls[0].args.text,p.text);
+  assert.equal('blocks' in f.calls[0].args,false);
+  for(const bad of [notice('Approve this.\nReceipt ID: other'),{...notice(),threadTs:'100.0001'},
+    (()=>{const n=notice();n.text=n.text.replace('The agent','<!channel> @here');return n;})()]){
+    const g=nativeFixture();assert.equal((await g.invoke(bad)).error,'native_invalid_payload');assert.equal(g.calls.length,0);
+  }
 });

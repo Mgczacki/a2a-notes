@@ -2,7 +2,9 @@
 
 A2A Notes uses the signed-in Slack Desktop app through a local debugging connection.
 It makes no direct Slack Web API requests.
+It calls the app's own API client inside the app.
 It does not read cookies or OAuth credentials.
+It never changes the open conversation, types in the composer, or clicks a Slack control.
 Slack does not document this app connection as a supported integration.
 
 ## Start the app connection
@@ -28,22 +30,20 @@ The connector verifies the debugging port owner before it connects.
 It observes events from native Slack sockets for the bound workspace and account.
 Restart Slack while A2A Notes listens if no new native socket is visible.
 Each pending event enters `desktop-events.json` before intake.
-The adapter checks its direct message conversation through the app view.
+The adapter checks the direct message conversation with `conversations.info`.
 Ordinary text supplies no instruction or approval.
-Recovery reads message records that the app displays.
+Recovery reads the 50 latest records of up to 20 direct conversations with `conversations.history`.
 Recovery does not provide a complete history export.
 
 ## Send and acknowledge
 
-The adapter opens and verifies the recipient's direct message view.
-It refuses to replace an existing composer draft.
-It inserts approved text and checks the composer before it clicks Send.
-It requires a matching outgoing message ID before recording delivery.
+The adapter finds the recipient's direct conversation with `conversations.open`.
+It checks the recipient profile with `users.info`.
+It posts approved text with the app's `chat.postMessage` call.
+It requires a matching channel and timestamp before recording delivery.
 An uncertain post gets no second send.
 
-Acknowledgement uses the reaction control for the exact saved timestamp.
-The adapter confirms the configured reaction from the bound account.
-When native sending is selected, acknowledgement uses the app's verified `reactions.add` call.
+Acknowledgement uses the app's verified `reactions.add` call.
 The call uses the original channel and timestamp.
 An existing own reaction counts as receipt confirmation.
 The service retains Retry-After and the reaction request limit across restart.
@@ -69,20 +69,20 @@ Decision: the Slack app is the only production Slack transport.
 Add `--send` to `a2a-notes desktop enable --url http://127.0.0.1:19322` to select native posting.
 Restart A2A Notes after changing this setting.
 Check `desktop.canSend` in `a2a-notes status`.
-The account and recipient checks still use the app adapter.
+The account check reads only the workspace and member IDs from the app page.
 The connector checks the inspected native module hashes before calling Slack's `apiCall`.
 Slack handles its credentials inside the app.
 A2A Notes records the attempt before dispatch and the receipt before marking the note sent.
 The native request gets one SDK attempt.
 The durable queue controls later attempts and honors Retry-After.
-A 429 or uncertain result cannot switch the same attempt to app composer controls.
-Known unavailability before posting permits the existing app composer path.
+Native posting is the only posting path.
+Unavailability before posting stops the note before posting. Use `a2anotes_retry_send` after Slack is ready.
 Invalid credentials and policy failures stop the native operation.
 Small attachments remain in the original message data.
 The native path also sends the existing display blocks.
 This preference makes no direct Slack HTTP call from A2A Notes.
 
-Use `desktop enable` without `--send` and restart A2A Notes to restore app composer posting.
+Without `--send`, A2A Notes reads and confirms receipt, but it does not post notes or delivery notices.
 The service still reads saved native receipts when it recovers an uncertain operation.
 Closing the debugger connection does not permit another post for an uncertain note.
 

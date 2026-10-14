@@ -13,9 +13,12 @@ export const NATIVE_PINS = {
 };
 export interface DesktopPost {
   team: string; owner: string; to: string; channel: string; messageId: string; text: string; blocks: string; threadTs?: string;
+  // A delivery notice has plain text and uses its operation ID as messageId.
+  kind?: 'notice';
 }
+export interface DesktopRead { team: string; owner: string; method: string; args: Record<string, unknown> }
 export interface DesktopReaction { team: string; owner: string; channel: string; ts: string; name: string }
-export interface NativeResult { ok?: boolean; ready?: boolean; channel?: string; ts?: string; error?: string; definite?: boolean; status?: number; retryAfter?: number; requestId?: string }
+export interface NativeResult { data?: any; ok?: boolean; ready?: boolean; channel?: string; ts?: string; error?: string; definite?: boolean; status?: number; retryAfter?: number; requestId?: string }
 
 // Arguments travel as CDP values. They never become executable source code.
 export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
@@ -46,18 +49,25 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
     let enqueued = false, request, timer;
     try {
       ${lookup}
+      const notice = input.kind === 'notice';
       if (!/^D[A-Z0-9]+$/.test(input.channel) || !/^[a-f0-9-]{36}$/i.test(input.messageId) ||
-          typeof input.text !== 'string' || input.text.length > 39000 ||
-          typeof input.blocks !== 'string' || input.threadTs && !/^\\d+\\.\\d+$/.test(input.threadTs))
+          typeof input.text !== 'string' || input.text.length > (notice ? 600 : 39000) ||
+          !notice && typeof input.blocks !== 'string' || input.threadTs && (notice || !/^\\d+\\.\\d+$/.test(input.threadTs)))
         return {error:'native_invalid_payload', definite:true};
-      const raw = input.text.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
-      const marker = raw.indexOf('A2A Notes data: ');
-      let wire, blocks;
-      try { wire = marker >= 0 ? JSON.parse(raw.slice(marker + 'A2A Notes data: '.length)) : raw; blocks = JSON.parse(input.blocks); }
-      catch {return {error:'native_invalid_payload', definite:true};}
-      if (typeof wire !== 'string' || !wire.startsWith('A2ANotes/1\\nID: ' + input.messageId + '\\n'))
-        return {error:'native_invalid_payload', definite:true};
-      if (!Array.isArray(blocks) || blocks.length > 50) return {error:'native_invalid_payload', definite:true};
+      if (notice) {
+        // A notice is fixed service text. It cannot carry a mention, a link, or note content.
+        if (!input.text.endsWith('\\nReceipt ID: ' + input.messageId) || /[<>&@]/.test(input.text))
+          return {error:'native_invalid_payload', definite:true};
+      } else {
+        const raw = input.text.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+        const marker = raw.indexOf('A2A Notes data: ');
+        let wire, blocks;
+        try { wire = marker >= 0 ? JSON.parse(raw.slice(marker + 'A2A Notes data: '.length)) : raw; blocks = JSON.parse(input.blocks); }
+        catch {return {error:'native_invalid_payload', definite:true};}
+        if (typeof wire !== 'string' || !wire.startsWith('A2ANotes/1\\nID: ' + input.messageId + '\\n'))
+          return {error:'native_invalid_payload', definite:true};
+        if (!Array.isArray(blocks) || blocks.length > 50) return {error:'native_invalid_payload', definite:true};
+      }
       const original = queue.q, own = Object.getOwnPropertyDescriptor(queue, 'q');
       const controller = new AbortController();
       timer = setTimeout(() => controller.abort(), 15000);
@@ -74,8 +84,8 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
           enqueued = true;
           return original.call(this, candidate, expedited);
         };
-        promise = store.dispatch(api({method:'chat.postMessage', reason:'a2anotes-approved-note', timeout:15, abortSignal:controller.signal,
-          args:{channel:input.channel, text:input.text, blocks:input.blocks, client_msg_id:input.messageId,
+        promise = store.dispatch(api({method:'chat.postMessage', reason:notice ? 'a2anotes-delivery-notice' : 'a2anotes-approved-note', timeout:15, abortSignal:controller.signal,
+          args:{channel:input.channel, text:input.text, ...(notice ? {} : {blocks:input.blocks}), client_msg_id:input.messageId,
             mrkdwn:false, unfurl_links:false, unfurl_media:false, parse:'none',
             ...(input.threadTs ? {thread_ts:input.threadTs, reply_broadcast:true} : {})}}));
       } finally { if (own) Object.defineProperty(queue, 'q', own); else delete queue.q; }
@@ -146,6 +156,61 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
         ...(status===429||code==='ratelimited'?{retryAfter:Math.max(1,retryAfter||60)}:{}),...(requestId?{requestId}:{})};
     }finally{clearTimeout(timer);}
   }`;
-  return { capability, post, react };
+  // Read calls are limited to these methods and argument shapes. Only copied fields leave the renderer.
+  const read = `async function(input) {
+    'use strict';
+    let timer;
+    try {
+      ${lookup}
+      const D = /^D[A-Z0-9]+$/, U = /^[UW][A-Z0-9]+$/, TS = /^\\d+\\.\\d+$/;
+      const a = input.args && typeof input.args === 'object' ? input.args : {}, keys = Object.keys(a);
+      const only = (...names) => keys.every(k => names.includes(k));
+      const limit = v => Number.isInteger(v) && v >= 1 && v <= 200;
+      const ts = v => v === undefined || typeof v === 'string' && TS.test(v);
+      let valid = false;
+      if (input.method === 'conversations.info') valid = only('channel') && D.test(a.channel);
+      if (input.method === 'conversations.open') valid = only('users','return_im') && U.test(a.users) && a.return_im === true;
+      if (input.method === 'conversations.history') valid = only('channel','limit','latest','oldest','inclusive') && D.test(a.channel) &&
+        limit(a.limit) && ts(a.latest) && ts(a.oldest) && (a.inclusive === undefined || a.inclusive === true);
+      if (input.method === 'users.info') valid = only('user') && U.test(a.user);
+      if (input.method === 'users.list') valid = only('limit','cursor') && limit(a.limit) &&
+        (a.cursor === undefined || typeof a.cursor === 'string' && /^[A-Za-z0-9=_%:-]{1,300}$/.test(a.cursor));
+      if (!valid) return {error:'native_invalid_payload', definite:true};
+      const controller = new AbortController();
+      timer = setTimeout(() => controller.abort(), 15000);
+      const r = await store.dispatch(api({method:input.method, reason:'a2anotes-read', timeout:15, abortSignal:controller.signal, args:{...a}}));
+      if (r?.ok !== true) return {error:'native_delivery_uncertain', definite:false};
+      const text = v => typeof v === 'string' ? v.slice(0, 200) : '';
+      const person = u => u && U.test(u.id) ? {id:u.id, name:text(u.profile?.display_name || u.real_name || u.name || u.id),
+        realName:text(u.real_name || u.profile?.real_name), title:text(u.profile?.title),
+        active:!u.deleted && !u.is_bot && !u.is_app_user && u.id !== 'USLACKBOT'} : undefined;
+      const channel = c => c && D.test(c.id) ? {id:c.id, is_im:c.is_im === true, ...(U.test(c.user) ? {user:c.user} : {})} : undefined;
+      const message = m => {
+        if (!m || !TS.test(m.ts) || !U.test(m.user) || typeof m.text !== 'string' || m.text.length > 64000) return undefined;
+        return {user:m.user, text:m.text, ts:m.ts,
+          ...(TS.test(m.thread_ts) ? {thread_ts:m.thread_ts} : {}), ...(typeof m.bot_id === 'string' ? {bot_id:m.bot_id.slice(0,40)} : {}),
+          ...(typeof m.app_id === 'string' ? {app_id:m.app_id.slice(0,40)} : {}), ...(typeof m.subtype === 'string' ? {subtype:m.subtype.slice(0,40)} : {}),
+          ...(typeof m.client_msg_id === 'string' && /^[a-f0-9-]{36}$/i.test(m.client_msg_id) ? {client_msg_id:m.client_msg_id} : {}),
+          reactions:(Array.isArray(m.reactions) ? m.reactions.slice(0,50) : []).map(x => ({name:text(x?.name),
+            users:Array.isArray(x?.users) ? x.users.filter(u => typeof u === 'string' && U.test(u)).slice(0,100) : []}))};
+      };
+      const next = typeof r.response_metadata?.next_cursor === 'string' && r.response_metadata.next_cursor ? r.response_metadata.next_cursor.slice(0,300) : undefined;
+      let data;
+      if (input.method === 'conversations.info' || input.method === 'conversations.open') data = {channel:channel(r.channel)};
+      if (input.method === 'conversations.history') data = {messages:(Array.isArray(r.messages) ? r.messages.slice(0,200) : []).map(message).filter(Boolean)};
+      if (input.method === 'users.info') data = {user:person(r.user)};
+      if (input.method === 'users.list') data = {members:(Array.isArray(r.members) ? r.members.slice(0,200) : []).map(person).filter(Boolean), ...(next ? {next} : {})};
+      return {ok:true, data};
+    } catch (error) {
+      if (error?.message === 'native_account_mismatch' || error?.message === 'native_interface_changed') return {error:error.message, definite:true};
+      const status = Number(error?.status);
+      const code = typeof error?.data?.error === 'string' && /^[a-z_]{1,80}$/.test(error.data.error) ? error.data.error : '';
+      const retryAfter = Math.ceil(Number(error?.retryAfter || 0) / 1000);
+      const definite = status === 429 || status >= 400 && status < 500 || !!code && !['internal_error','fatal_error','_parse_error'].includes(code);
+      return {error:code || 'native_delivery_uncertain', definite, ...(status>=100 && status<=599 ? {status} : {}),
+        ...(status===429 || code==='ratelimited' ? {retryAfter:Math.max(1, retryAfter || 60)} : {})};
+    } finally { clearTimeout(timer); }
+  }`;
+  return { capability, post, react, read };
 }
 export const NATIVE_FUNCTIONS = nativeFunctions();

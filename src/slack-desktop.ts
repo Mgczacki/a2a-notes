@@ -8,14 +8,14 @@ import { readSlackText, DATA_MARKER } from './slack-format.ts';
 import { savePrivate } from './store.ts';
 import { TransportError, type Identity, type Received } from './transport.ts';
 import { DesktopDeliveries } from './slack-desktop-delivery.ts';
-import { NATIVE_FUNCTIONS, type DesktopPost, type DesktopReaction, type NativeResult } from './slack-desktop-native.ts';
+import { NATIVE_FUNCTIONS, type DesktopPost, type DesktopReaction, type DesktopRead, type NativeResult } from './slack-desktop-native.ts';
 import { decode } from './protocol.ts';
 
 export interface DesktopConfig { url: string; send?: boolean }
 export interface DesktopStatus {
   enabled: boolean; connected: boolean; accountVerified: boolean; listening: boolean; lastEventAt?: string;
   pending: number; error?: string;
-  sendEnabled?: boolean; canSend?: boolean;
+  sendEnabled?: boolean; canSend?: boolean; canRead?: boolean;
 }
 export class DesktopUnavailableError extends TransportError {
   constructor() { super('Slack Desktop sending is unavailable before posting.', true); }
@@ -107,6 +107,7 @@ export class SlackDesktopHook {
   private nativeLimitsFile: string;
   private reactionLimits: Record<string, number>;
   private reactionLimitsFile: string;
+  private readLimits = new Map<string, number>();
   private deliveries: DesktopDeliveries;
   private requests = new Map<number, {socket:WebSocket; resolve:(value:any)=>void; reject:(error:Error)=>void; timer:ReturnType<typeof setTimeout>}>();
   constructor(private options: {
@@ -134,8 +135,11 @@ export class SlackDesktopHook {
       throw new Error('The saved desktop events could not be checked.');
     this.queue = saved;
   }
-  status(): DesktopStatus { return { ...this.statusValue, pending: this.queue.length, ...(this.options.config.send ? {canSend:this.canSend()} : {}) }; }
-  canSend() { return !this.stopped && this.options.config.send === true && [...this.nativeTargets.keys()].some(id => this.verifiedTargets.has(id) && this.sockets.get(id)?.readyState === WebSocket.OPEN); }
+  status(): DesktopStatus { return { ...this.statusValue, pending: this.queue.length, canRead: this.canRead(), ...(this.options.config.send ? {canSend:this.canSend()} : {}) }; }
+  // Background calls run inside the verified app renderer. They never change the Slack window.
+  canRead() { return !this.stopped && !!this.readyTarget(); }
+  canSend() { return this.options.config.send === true && this.canRead(); }
+  private readyTarget() { return [...this.nativeTargets.keys()].find(id => this.verifiedTargets.has(id) && this.sockets.get(id)?.readyState === WebSocket.OPEN); }
   private request(socket: WebSocket, method: string, params: object, timeout = 5000): Promise<any> {
     if (socket.readyState !== WebSocket.OPEN) return Promise.reject(new TransportError('The desktop connection is closed.', false));
     const id = ++this.sequence;
@@ -146,7 +150,7 @@ export class SlackDesktopHook {
     });
   }
   private async checkNative(id: string, socket: WebSocket, team: string, owner: string) {
-    if (!this.options.config.send || this.nativeChecking.has(id)) return;
+    if (this.nativeChecking.has(id)) return;
     this.nativeChecking.set(id, socket);
     try {
       let objectId = this.rendererGlobals.get(id);
@@ -176,7 +180,7 @@ export class SlackDesktopHook {
     } catch { throw new TransportError('The native send payload does not match its note and sender.', true); }
     try { await (this.options.verifyEndpoint || verifySlackDesktopEndpoint)(this.endpoint); } catch { throw new DesktopUnavailableError(); }
     if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}`) throw new TransportError('The native account changed before posting.', true);
-    const target = [...this.nativeTargets.keys()].find(id => this.verifiedTargets.has(id) && this.sockets.get(id)?.readyState === WebSocket.OPEN);
+    const target = this.readyTarget();
     if (this.stopped || !target) throw new DesktopUnavailableError();
     const limited = this.nativeLimits[input.team] || 0;
     if (limited > Date.now()) throw new TransportError('Slack Desktop is waiting after a chat.postMessage rate limit.', true, Math.ceil((limited-Date.now())/1000), 'chat.postMessage', 0);
@@ -207,7 +211,7 @@ export class SlackDesktopHook {
     try {await (this.options.verifyEndpoint || verifySlackDesktopEndpoint)(this.endpoint);} catch {throw new DesktopUnavailableError();}
     if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}`)
       throw new TransportError('The native receipt account changed.', true);
-    const target = [...this.nativeTargets.keys()].find(id => this.verifiedTargets.has(id) && this.sockets.get(id)?.readyState === WebSocket.OPEN);
+    const target = this.readyTarget();
     if (this.stopped || !target) throw new DesktopUnavailableError();
     const limited=this.reactionLimits[input.team]||0;
     if(limited>Date.now())throw new TransportError('Slack Desktop is waiting after a reactions.add rate limit.',true,Math.ceil((limited-Date.now())/1000),'reactions.add',0);
@@ -222,6 +226,43 @@ export class SlackDesktopHook {
       this.reactionLimits[input.team]=Date.now()+Math.max(1,retryAfter||60)*1000;savePrivate(this.reactionLimitsFile,this.reactionLimits);
     }
     throw new TransportError(result?.definite?`Slack Desktop: ${code}`:'Slack Desktop receipt is uncertain.',result?.definite===true,retryAfter,'reactions.add',result?.status,result?.requestId);
+  }
+  async read(input: DesktopRead): Promise<any> {
+    const notReady = () => new TransportError('Slack Desktop background access is not ready. No action was taken.', true, 10, 'slack.desktop');
+    if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}`) throw new TransportError('The native read account changed.', true);
+    const target = this.readyTarget();
+    if (this.stopped || !target) throw notReady();
+    const limited = this.readLimits.get(input.method) || 0;
+    if (limited > Date.now()) throw new TransportError(`Slack Desktop is waiting after a ${input.method} rate limit.`, true, Math.ceil((limited-Date.now())/1000), input.method, 0);
+    const reply = await this.request(this.sockets.get(target)!, 'Runtime.callFunctionOn', {objectId:this.nativeTargets.get(target),functionDeclaration:NATIVE_FUNCTIONS.read,
+      arguments:[{value:input}],returnByValue:true,awaitPromise:true}, 20_000);
+    const result = reply.result?.value as NativeResult | undefined;
+    if (result?.ok) return result.data;
+    const code = typeof result?.error === 'string' && /^[a-z_]{1,80}$/.test(result.error) ? result.error : 'read_failed';
+    if (code === 'native_interface_changed') throw notReady();
+    const retryAfter = Number.isFinite(result?.retryAfter) && result!.retryAfter! > 0 ? result!.retryAfter! : 0;
+    if (result?.status === 429 || code === 'ratelimited') this.readLimits.set(input.method, Date.now() + Math.max(1, retryAfter || 60)*1000);
+    throw new TransportError(`Slack Desktop: ${code}`, result?.definite === true, retryAfter, input.method, result?.status);
+  }
+  // Posts one fixed delivery notice. The operation ID becomes the Slack client message ID.
+  async notice(input: {team: string; owner: string; channel: string; operationId: string; text: string}) {
+    if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}`) throw new TransportError('The native notice account changed.', true);
+    try { await (this.options.verifyEndpoint || verifySlackDesktopEndpoint)(this.endpoint); } catch { throw new DesktopUnavailableError(); }
+    const target = this.readyTarget();
+    if (this.stopped || !target || !this.options.config.send) throw new DesktopUnavailableError();
+    const limited = this.nativeLimits[input.team] || 0;
+    if (limited > Date.now()) throw new TransportError('Slack Desktop is waiting after a chat.postMessage rate limit.', true, Math.ceil((limited-Date.now())/1000), 'chat.postMessage', 0);
+    const post: DesktopPost = {kind:'notice', team:input.team, owner:input.owner, to:'', channel:input.channel, messageId:input.operationId, text:input.text, blocks:''};
+    const reply = await this.request(this.sockets.get(target)!, 'Runtime.callFunctionOn', {objectId:this.nativeTargets.get(target),functionDeclaration:NATIVE_FUNCTIONS.post,
+      arguments:[{value:post}],returnByValue:true,awaitPromise:true}, 25_000);
+    const result = reply.result?.value as NativeResult | undefined;
+    if (result?.ok && result.channel === input.channel && result.ts) return {channel: result.channel, ts: result.ts};
+    const code = typeof result?.error === 'string' && /^[a-z_]{1,80}$/.test(result.error) ? result.error : 'send_failed';
+    if (result?.definite && code === 'native_interface_changed') throw new DesktopUnavailableError();
+    const retryAfter = Number.isFinite(result?.retryAfter) && result!.retryAfter! > 0 ? result!.retryAfter! : 0;
+    if (result?.status === 429 || code === 'ratelimited') {this.nativeLimits[input.team] = Date.now() + Math.max(1, retryAfter || 60)*1000;savePrivate(this.nativeLimitsFile,this.nativeLimits);}
+    throw new TransportError(result?.definite ? `Slack Desktop: ${code}` : 'Slack Desktop notice delivery is uncertain.', result?.definite === true,
+      retryAfter, 'chat.postMessage', result?.status, result?.requestId);
   }
   private save() { savePrivate(this.file, this.queue); }
   private state() {
@@ -340,7 +381,7 @@ export class SlackDesktopHook {
     await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); socket.once('close', () => reject(new Error('Desktop connection closed.'))); });
     if (this.stopped) { socket.terminate(); return; }
     socket.send(JSON.stringify({ id: ++this.sequence, method: 'Network.enable', params: {} }));
-    if(this.options.config.send) socket.send(JSON.stringify({id:++this.sequence,method:'Runtime.enable',params:{}}));
+    socket.send(JSON.stringify({id:++this.sequence,method:'Runtime.enable',params:{}}));
     identityCheck();
   }
   private async drain() {

@@ -106,8 +106,8 @@ Unknown failures and uncertain delivery cannot use this operation.
 Invalid credentials and changed policy cannot use it.
 
 The review page shows **Retry approved note** when the current checks permit retry.
-The Slack adapter waits up to 20 seconds for the selected native sender after navigation.
-If native sending stays unavailable, the adapter stops before composing or posting.
+The Slack adapter waits up to 20 seconds for the native sender.
+If native sending stays unavailable, the adapter stops before posting.
 Message text and tool arguments cannot supply the human decision.
 
 The client must advertise MCP form elicitation.
@@ -177,12 +177,13 @@ A client can attach `metadata` to a draft in `a2anotes_create_draft` and `a2anot
 Outgoing approval stores the note as `queued` before the app acts.
 The worker checks the saved approval and content hash before each attempt.
 The adapter verifies the workspace and account before each app operation.
-It confirms the recipient from the app's direct message view.
-It refuses to replace an existing composer draft.
+It reads Slack records through the app's own API client in the background.
+It never changes the open conversation, types in the composer, or clicks a Slack control.
+It confirms the recipient with `conversations.open` and `users.info`.
 
-The adapter saves `postStarted` before it clicks Send.
-The app must show the matching message ID before delivery becomes `sent`.
-After an uncertain post, the adapter searches displayed messages for that ID.
+The adapter saves `postStarted` before it calls `chat.postMessage`.
+Slack must return the matching channel and timestamp before delivery becomes `sent`.
+After an uncertain post, the adapter searches recent conversation records for that message ID.
 It never repeats an uncertain post.
 
 The service retains its retry deadlines and attempt limit.
@@ -272,10 +273,10 @@ Older messages with blocks remain readable through their saved data marker.
 
 The connector receives explicit messages from verified native app events.
 It stores each event before message intake.
-It verifies direct message membership through the app view.
+It verifies direct message membership with `conversations.info`.
 Self-conversation requests require the signed-in account as sender.
-App recovery reads currently displayed message records.
-It can read older records that load after newer records.
+App recovery reads the 50 latest records of up to 20 direct conversations with `conversations.history`.
+These are the self-conversation, conversations of sent notes, and conversations with saved cursors.
 The protocol store removes duplicate delivery by the original Slack message reference.
 This version does not recover a complete workspace history.
 The app must reopen its native connection while the connector listens to supply live events.
@@ -295,9 +296,9 @@ A rejection with `review_context` keeps that text as `rejected.comment`, so the 
 
 ## People
 
-People search uses profiles available in the current app view.
-It does not export the workspace directory or search email through an API.
-Open the recipient in Slack before using an explicit member address.
+People search reads up to 2,000 members with `users.list` and keeps the list for 10 minutes.
+It does not search email.
+An explicit member address uses `conversations.open`. Slack can then list that direct conversation in the sidebar.
 The adapter verifies the active recipient from the app's direct message view.
 
 ## Clients
@@ -327,8 +328,8 @@ A person can acknowledge a held note. Agents can acknowledge only approved conte
 
 Verified native human replies and direct messages queue acknowledgement in the same write that stores the note.
 Failed or quarantined input receives no automatic acknowledgement.
-Slack adds ✅ through the app reaction control for the saved message.
-The adapter requires the app to show that reaction from the bound account.
+The adapter adds ✅ with the app's `reactions.add` call for the saved message.
+It reads that message with `conversations.history` first. An existing reaction from the bound account counts as confirmation.
 Set `slack.acknowledgementEmoji` to a Slack emoji name to change the reaction. The default is `white_check_mark`.
 
 The note exposes `acknowledgement` with its status and error.

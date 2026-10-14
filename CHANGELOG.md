@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.0
+
+- Stop operating the Slack window. The adapter no longer navigates, types in the composer, or clicks controls.
+- Read conversations, members, and messages through the app's own API client in the background.
+- Permit only `conversations.info`, `conversations.open`, `conversations.history`, `users.info`, and `users.list` for reads.
+- Post delivery notices through the native `chat.postMessage` call with the operation ID as the client message ID.
+- Stop before posting when native sending is off or unavailable. No composer fallback remains.
+- Save the send checkpoint before the first read, so a lost read returns the note to the queue.
+
 ## 0.11.3
 
 - Read current Slack Message records from their `msg` field.
