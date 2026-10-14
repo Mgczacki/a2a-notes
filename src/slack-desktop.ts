@@ -124,6 +124,8 @@ export class SlackDesktopHook {
   private nativeLimitsFile: string;
   private reactionLimits: Record<string, number>;
   private reactionLimitsFile: string;
+  private fileLimits: Record<string, number>;
+  private fileLimitsFile: string;
   private readLimits = new Map<string, number>();
   private deliveries: DesktopDeliveries;
   private requests = new Map<number, {socket:WebSocket; resolve:(value:any)=>void; reject:(error:Error)=>void; timer:ReturnType<typeof setTimeout>}>();
@@ -146,6 +148,10 @@ export class SlackDesktopHook {
     this.reactionLimits = existsSync(this.reactionLimitsFile) ? JSON.parse(readFileSync(this.reactionLimitsFile, 'utf8')) : {};
     if (!this.reactionLimits || Array.isArray(this.reactionLimits) || Object.entries(this.reactionLimits).some(([team, at]) => !/^T[A-Z0-9]+$/.test(team) || !Number.isFinite(at) || at < 0))
       throw new Error('The saved reaction rate limits could not be checked.');
+    this.fileLimitsFile = join(options.dir, 'desktop-file-limits.json');
+    this.fileLimits = existsSync(this.fileLimitsFile) ? JSON.parse(readFileSync(this.fileLimitsFile, 'utf8')) : {};
+    if (!this.fileLimits || Array.isArray(this.fileLimits) || Object.entries(this.fileLimits).some(([key, at]) => !/^T[A-Z0-9]+:(ticket|complete)$/.test(key) || !Number.isFinite(at) || at < 0))
+      throw new Error('The saved file rate limits could not be checked.');
     this.statusValue.sendEnabled = options.config.send === true;
     this.file = join(options.dir, 'desktop-events.json');
     const saved = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : [];
@@ -265,6 +271,11 @@ export class SlackDesktopHook {
   private async callFile(input: DesktopFile): Promise<NativeResult & {fileId?: string; url?: string}> {
     if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}`)
       throw new TransportError('The native file account changed.', true);
+    const method = input.operation === 'complete' ? 'files.completeUploadExternal' : 'files.getUploadURLExternal';
+    const limitKey = `${input.team}:${input.operation}`;
+    const limited = this.fileLimits[limitKey] || 0;
+    if (limited > Date.now()) throw new TransportError(`Slack Desktop is waiting after a ${method} rate limit.`, true,
+      Math.ceil((limited-Date.now())/1000), method, 0);
     try { await (this.options.verifyEndpoint || verifySlackDesktopEndpoint)(this.endpoint); } catch { throw new DesktopUnavailableError(); }
     const target = this.readyTarget();
     if (this.stopped || !target || !this.options.config.send) throw new DesktopUnavailableError();
@@ -275,9 +286,13 @@ export class SlackDesktopHook {
     if (result?.ok === true) return result;
     const code = typeof result?.error === 'string' && /^[a-z_]{1,80}$/.test(result.error) ? result.error : 'file_failed';
     if (code === 'native_interface_changed') throw new DesktopUnavailableError();
+    const retryAfter = Number.isFinite(result?.retryAfter) && result!.retryAfter! > 0 ? result!.retryAfter! : 0;
+    if (result?.status === 429 || code === 'ratelimited') {
+      this.fileLimits[limitKey] = Date.now() + Math.max(1, retryAfter || 60)*1000;
+      savePrivate(this.fileLimitsFile, this.fileLimits);
+    }
     throw new TransportError(result?.definite ? `Slack Desktop: ${code}` : 'Slack Desktop file delivery is uncertain.',
-      result?.definite === true, 0, input.operation === 'complete' ? 'files.completeUploadExternal' :
-        'files.getUploadURLExternal', result?.status);
+      result?.definite === true, retryAfter, method, result?.status, result?.requestId);
   }
   async uploadFile(input: {team:string;owner:string;name:string;bytes:Buffer}, saveTicket:(fileId:string)=>void) {
     const ticket=await this.callFile({team:input.team,owner:input.owner,operation:'ticket',name:input.name,length:input.bytes.length});

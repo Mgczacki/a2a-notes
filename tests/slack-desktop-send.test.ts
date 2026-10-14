@@ -72,6 +72,18 @@ test('native file ticket and completion use one SDK attempt with exact note data
     files:[{id:'FTEST01',title:'report.md'}]},invalid.functions.file)).definite,true);
   assert.equal(invalid.calls.length,0);
 });
+test('native file errors return Retry-After and classify Slack errors without exposing request data',async()=>{
+  const ticket={team:'TEXAMPLE',owner:MARIO,operation:'ticket',name:'report.md',length:100};
+  for(const [mode,definite] of [['429',true],['invalid',true],['lost',false]] as const){
+    const f=nativeFixture(mode),result=await f.invoke(ticket as DesktopFile,f.functions.file);
+    assert.equal(result.definite,definite);assert.equal(f.calls.length,1);assert.equal(f.calls[0].attempts,1);
+    if(mode==='429'){assert.equal(result.status,429);assert.equal(result.retryAfter,600);assert.equal(result.requestId,'request-id');}
+    assert.ok(!JSON.stringify(result).includes('private'));
+  }
+  const changed=nativeFixture();changed.factories.IlU1=function changedFactory(){};
+  const result=await changed.invoke(ticket as DesktopFile,changed.functions.file);
+  assert.equal(result.error,'native_interface_changed');assert.equal(result.definite,true);assert.equal(changed.calls.length,0);
+});
 test('signed binary upload accepts only files.slack.com and sends no credential header',async()=>{
   const sent:{url:string;init:RequestInit}[]=[];
   const fake=(async(url:string|URL|Request,init:RequestInit)=>{sent.push({url:String(url),init});return new Response('OK',{status:200});}) as typeof fetch;
@@ -206,8 +218,8 @@ test('native unavailability before posting permits the existing Web API path', a
 async function wait(check:()=>boolean) {
   const end=Date.now()+5000;while(!check()){if(Date.now()>end)assert.fail('Native fixture timed out.');await new Promise(r=>setTimeout(r,20));}
 }
-async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<any>,onReact?:(p:DesktopReaction)=>Promise<any>) {
-  let port=0;const clients=new Set<WebSocket>(),posts:DesktopPost[]=[],reactions:DesktopReaction[]=[];
+async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<any>,onReact?:(p:DesktopReaction)=>Promise<any>,onFile?:(p:DesktopFile)=>Promise<any>) {
+  let port=0;const clients=new Set<WebSocket>(),posts:DesktopPost[]=[],reactions:DesktopReaction[]=[],files:DesktopFile[]=[];
   const server=createServer((_req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify([{id:'native-page',type:'page',url:'https://app.slack.com/client/TEXAMPLE/DTEST',webSocketDebuggerUrl:`ws://127.0.0.1:${port}/devtools/page/native-page`}]));});
   const ws=new WebSocketServer({server});ws.on('connection',client=>{
     clients.add(client);client.on('close',()=>clients.delete(client));
@@ -219,6 +231,7 @@ async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<
         let value;
         if(m.params.functionDeclaration===NATIVE_FUNCTIONS.capability)value={ready:true};
         else if(m.params.functionDeclaration===NATIVE_FUNCTIONS.react){assert.ok(onReact);const p=m.params.arguments[0].value;reactions.push(p);value=await onReact(p);}
+        else if(m.params.functionDeclaration===NATIVE_FUNCTIONS.file){assert.ok(onFile);const p=m.params.arguments[0].value;files.push(p);value=await onFile(p);}
         else {assert.equal(m.params.functionDeclaration,NATIVE_FUNCTIONS.post);const p=m.params.arguments[0].value;posts.push(p);value=await onPost(p,client);}
         if(value&&client.readyState===1)client.send(JSON.stringify({id:m.id,result:{result:{value}}}));
       }
@@ -226,8 +239,24 @@ async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<
   });
   await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));port=(server.address() as any).port;
   t.after(async()=>{for(const c of clients)c.terminate();await new Promise<void>(r=>ws.close(()=>server.close(()=>r())));});
-  return {url:`http://127.0.0.1:${port}`,posts,reactions,clients};
+  return {url:`http://127.0.0.1:${port}`,posts,reactions,files,clients};
 }
+
+test('file completion saves a 429 deadline and checks it after restart',async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'native-file-429-'));
+  const remote=await nativeCDP(t,async p=>({ok:true,channel:p.channel,ts:'100.0001'}),undefined,
+    async()=>({error:'ratelimited',definite:true,status:429,retryAfter:70,requestId:'file-request'}));
+  const options={dir,config:{url:remote.url,send:true},identity:()=>({transport:'slack',address:`slack:TEXAMPLE:${MARIO}`,name:'Mario',scopes:[],missingScopes:[],optionalMissing:[]}),
+    verifyEndpoint:async()=>{},verifyChannel:async()=>false,receive:async()=>{}};
+  let hook=new SlackDesktopHook(options);t.after(()=>hook.close());hook.start();await wait(()=>hook.canSend());
+  const file={team:'TEXAMPLE',owner:MARIO,channel:'DTEST',messageId:randomUUID(),text:'A2A Notes data: x',files:[{id:'FTEST01',title:'report.md'}]};
+  await assert.rejects(hook.completeFile(file),e=>e instanceof TransportError&&e.status===429&&e.retryAfter===70&&e.requestId==='file-request');
+  assert.equal(remote.files.length,1);
+  await hook.close();hook=new SlackDesktopHook(options);hook.start();await wait(()=>hook.canSend());
+  await assert.rejects(hook.completeFile(file),e=>e instanceof TransportError&&e.status===0&&e.retryAfter>0);
+  assert.equal(remote.files.length,1);
+  assert.equal((await hook.post(input(),()=>{})).ts,'100.0001');
+});
 
 test('native reaction limits survive restart and do not block message posting',async t=>{
   const dir=mkdtempSync(join(tmpdir(),'native-reaction-429-'));

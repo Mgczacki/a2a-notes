@@ -459,6 +459,66 @@ test('an uncertain file completion finds its message and never completes twice',
   assert.equal(completions,1);
 });
 
+test('file completion 429 queues the approved note and retries after Retry-After',async t=>{
+  const f=fixture();await f.transport.connect();let now=Date.now(),completions=0,tickets=0;
+  const service=new NotesService({store:new Store(join(f.file,'..')),transport:f.transport,now:()=>now,random:()=>0.5,scanIntervalMs:0,retryIntervalMs:0});
+  t.after(()=>service.stop());
+  const bytes=Buffer.from('# Report\nText.');
+  const staged=service.stageFile(person,{name:'report.md',text:bytes.toString(),sha256:sha256(bytes),request_id:randomUUID()});
+  const draft=await service.createDraft(person,{to_address:'slack:TEXAMPLE:UALEX01',subject:'Report',body:'Please read.',audience:'person',file_ids:[staged.file_id],request_id:randomUUID()});
+  service.approve(person,{id:draft.id,expected_hash:draft.hash,decision:'approve'});
+  const approval=structuredClone(service.store.note(draft.id)!.approval);
+  f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new Error('No text post');},
+    uploadFile:async(_input,saveTicket)=>{const id=`FNEW0${++tickets}`;saveTicket(id);return id;},
+    completeFile:async input=>{completions++;if(completions===1)throw new TransportError('Slack Desktop: ratelimited',true,45,'files.completeUploadExternal',429,'request-id');
+      f.s.messages.push({channel:input.channel!,user:f.s.user,text:input.text!,ts:'1791935000.030',subtype:'file_share',
+        files:[{id:input.files![0].id,name:'report.md',size:bytes.length}],reactions:[]});return {ok:true};}};
+  await service.send(person,{id:draft.id,expected_hash:draft.hash,request_id:randomUUID()});
+  const queued=service.store.note(draft.id)!;
+  assert.equal(queued.state,'queued');assert.equal(queued.checkpoint?.postStarted,false);
+  assert.equal(queued.checkpoint?.uploads[staged.file_id].phase,'uploaded');
+  assert.equal(queued.delivery!.lastRequestId,'request-id');
+  assert.ok(Date.parse(queued.delivery!.nextAttemptAt!)>=now+45_000);
+  assert.deepEqual(queued.approval,approval);
+  now=Date.parse(queued.delivery!.nextAttemptAt!)+1;await service.processQueue();
+  assert.equal(service.store.note(draft.id)!.state,'sent');assert.equal(completions,2);assert.equal(tickets,2);
+});
+
+test('file completion interface change before enqueue can be retried under the same approval',async t=>{
+  const f=fixture();await f.transport.connect();const service=new NotesService({store:new Store(join(f.file,'..')),transport:f.transport,scanIntervalMs:0,retryIntervalMs:0});
+  t.after(()=>service.stop());const bytes=Buffer.from('# Report\nText.');
+  const staged=service.stageFile(person,{name:'report.md',text:bytes.toString(),sha256:sha256(bytes),request_id:randomUUID()});
+  const draft=await service.createDraft(person,{to_address:'slack:TEXAMPLE:UALEX01',subject:'Report',body:'Please read.',audience:'person',file_ids:[staged.file_id],request_id:randomUUID()});
+  service.approve(person,{id:draft.id,expected_hash:draft.hash,decision:'approve'});
+  f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new Error('No text post');},
+    uploadFile:async(_input,saveTicket)=>{saveTicket('FNEW01');return 'FNEW01';},completeFile:async()=>{throw new DesktopUnavailableError();}};
+  await assert.rejects(service.send(person,{id:draft.id,expected_hash:draft.hash,request_id:randomUUID()}),/No post was started/);
+  const failed=service.store.note(draft.id)!;
+  assert.equal(failed.state,'permanent_failure');assert.equal(failed.checkpoint?.postStarted,false);
+  assert.equal(failed.checkpoint?.uploads[staged.file_id].phase,'uploaded');
+  const retried=await service.retrySend(person,{id:draft.id,expected_hash:draft.hash,request_id:randomUUID()});
+  assert.equal(retried.state,'queued');assert.deepEqual(service.store.note(draft.id)!.approval,failed.approval);
+});
+
+test('a slow file share history result recovers without another completion',async()=>{
+  const f=fixture();await f.transport.connect();let saved:any,completions=0,postedText='';
+  const id=randomUUID(),bytes=Buffer.from('# Report\nText.');
+  const input={to:'slack:TEXAMPLE:UALEX01',messageId:id,
+    display:{subject:'Report',body:'Please read.',audience:'person' as const,senderName:'Mario',files:[{name:'report.md',size:bytes.length}]},
+    files:[{id:'file',name:'report.md',bytes}],wire:()=>`A2ANotes/1\nID: ${id}\nBody: Please read.`,
+    saveCheckpoint:(value:any)=>{saved=structuredClone(value);}};
+  f.transport.desktopSender={canSend:()=>true,post:async()=>{throw new Error('No text post');},
+    uploadFile:async(_input,saveTicket)=>{saveTicket('FNEW01');return 'FNEW01';},
+    completeFile:async data=>{completions++;postedText=data.text!;return {ok:true};}};
+  await assert.rejects(f.transport.send(input),/has not confirmed/);
+  assert.equal(saved.postStarted,true);assert.equal(saved.uploads.file.phase,'complete');
+  f.s.messages.push({channel:'DOTHER01',user:'UMARIO01',text:postedText,ts:'1791935000.040',subtype:'file_share',
+    files:[{id:'FNEW01',name:'report.md',size:bytes.length}],reactions:[]});
+  assert.equal((await f.transport.findSent(input.to,id,undefined,{save:()=>{},expectedFiles:[{name:'report.md',size:bytes.length}]}))?.ts,'1791935000.040');
+  await assert.rejects(f.transport.send({...input,checkpoint:saved}),/reconciled/);
+  assert.equal(completions,1);
+});
+
 test('an approved agent note with its JSON file reaches another app account through the protocol core', async () => {
   const f=fixture(); await f.transport.connect();
   const {agent, stageAgentFile, agentRequest, rid} = await import('./helpers.ts');

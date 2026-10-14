@@ -164,7 +164,7 @@ export class SlackAppConnection {
     if (!Number.isInteger(expectedSize) || expectedSize < 1 || expectedSize > maxBytes || maxBytes > 2 * 1024 * 1024)
       throw new TransportError('The Slack file size is invalid.', true);
     const url = new URL(value);
-    if (url.protocol !== 'https:' || !(url.hostname === 'slack.com' || url.hostname.endsWith('.slack.com')) ||
+    if (url.protocol !== 'https:' || url.hostname !== 'files.slack.com' ||
         url.username || url.password || url.hash)
       throw new TransportError('The Slack app file URL is invalid.', true);
     await this.identity();

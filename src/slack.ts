@@ -222,8 +222,18 @@ export class SlackTransport implements Transport {
         checkpoint.postTransport='desktop';checkpoint.postStarted=true;
         for(const f of support)checkpoint.uploads[f.id].phase='completing';
         input.saveCheckpoint?.(checkpoint);
-        await sender.completeFile({team:s.team,owner:s.user,channel,messageId:input.messageId,text,files:uploaded,
-          ...(input.threadTs?{threadTs:input.threadTs}:{})});
+        try {
+          await sender.completeFile({team:s.team,owner:s.user,channel,messageId:input.messageId,text,files:uploaded,
+            ...(input.threadTs?{threadTs:input.threadTs}:{})});
+        } catch(error) {
+          if(error instanceof TransportError&&error.definite){
+            checkpoint.postStarted=false;
+            for(const f of support)checkpoint.uploads[f.id].phase='uploaded';
+            input.saveCheckpoint?.(checkpoint);
+          }
+          if(error instanceof DesktopUnavailableError)throw notReady();
+          throw error;
+        }
         for(const f of support)checkpoint.uploads[f.id].phase='complete';input.saveCheckpoint?.(checkpoint);
         for(let attempt=0;attempt<10;attempt++){
           await app.navigate(channel);

@@ -286,8 +286,14 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
     }catch(error){
       if(!enqueued)return {error:error?.message==='native_account_mismatch'?'native_account_mismatch':'native_interface_changed',definite:true};
       const status=Number(error?.status),code=typeof error?.data?.error==='string'&&/^[a-z_]{1,80}$/.test(error.data.error)?error.data.error:'';
-      return {error:code||'native_delivery_uncertain',definite:status===429||status>=400&&status<500,
-        ...(status>=100&&status<=599?{status}:{})};
+      const headers=request?._xhr,retryHeader=Number(headers?.getResponseHeader?.('Retry-After'));
+      const requestId=headers?.getResponseHeader?.('x-slack-req-id');
+      const retryAfter=Number.isFinite(retryHeader)&&retryHeader>0?Math.ceil(retryHeader):Math.ceil(Number(error?.retryAfter||0)/1000);
+      const definite=status===429||status>=400&&status<500||!!code&&!['internal_error','fatal_error','_parse_error'].includes(code);
+      return {error:code||'native_delivery_uncertain',definite,
+        ...(status>=100&&status<=599?{status}:{}),
+        ...(status===429||code==='ratelimited'?{retryAfter:Math.max(1,retryAfter||60)}:{}),
+        ...(typeof requestId==='string'&&/^[A-Za-z0-9-]{1,100}$/.test(requestId)?{requestId}:{})};
     }finally{clearTimeout(timer);}
   }`;
   return { capability, post, react, read, file };
