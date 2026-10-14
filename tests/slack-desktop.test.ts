@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { SlackDesktopHook, desktopURL, desktopEvent, DESKTOP_IDENTITY } from '../src/slack-desktop.ts';
+import { SlackDesktopHook, desktopURL, desktopEvent, DESKTOP_IDENTITY, SOCKET_LISTENER, FRAME_BINDING } from '../src/slack-desktop.ts';
 import { TransportError } from '../src/transport.ts';
 import { fakeWorkspace, personService, person, agent, MARIO, ALEX, rid } from './helpers.ts';
 import { encode } from '../src/protocol.ts';
@@ -86,9 +86,10 @@ test('native owner events use the current service checks and deduplicate with po
   await wait(() => hook.status().pending === 0); await owner.service.scanNow();
   assert.equal(owner.service.list(person, { direction: 'incoming' }).messages.length, 1);
   // Without sending, the hook listens, checks the account, and checks background read readiness only.
-  assert.ok(remote.calls.every(m => ['Network.enable', 'Runtime.enable', 'Runtime.evaluate', 'Runtime.callFunctionOn'].includes(m.method)));
-  assert.ok(remote.calls.filter(m => m.method === 'Runtime.evaluate').every(m => [DESKTOP_IDENTITY, 'globalThis'].includes(m.params.expression)));
-  assert.ok(remote.calls.filter(m => m.method === 'Runtime.callFunctionOn').every(m => m.params.functionDeclaration === NATIVE_FUNCTIONS.capability));
+  assert.ok(remote.calls.every(m => ['Network.enable', 'Runtime.enable', 'Runtime.addBinding', 'Runtime.evaluate', 'Runtime.queryObjects',
+    'Runtime.callFunctionOn', 'Runtime.releaseObjectGroup'].includes(m.method)));
+  assert.ok(remote.calls.filter(m => m.method === 'Runtime.evaluate').every(m => [DESKTOP_IDENTITY, 'globalThis', 'WebSocket.prototype'].includes(m.params.expression)));
+  assert.ok(remote.calls.filter(m => m.method === 'Runtime.callFunctionOn').every(m => [NATIVE_FUNCTIONS.capability, SOCKET_LISTENER].includes(m.params.functionDeclaration)));
   assert.ok(!readFileSync(join(dir, 'desktop-events.json'), 'utf8').includes('private'));
 });
 

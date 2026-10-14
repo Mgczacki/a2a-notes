@@ -286,7 +286,8 @@ App recovery reads the 50 latest records of up to 20 direct conversations with `
 These are the self-conversation, conversations of sent notes, and conversations with saved cursors.
 The protocol store removes duplicate delivery by the original Slack message reference.
 This version does not recover a complete workspace history.
-The app must reopen its native connection while the connector listens to supply live events.
+The connector also listens to Slack sockets that opened before A2A Notes started. It reads each such message back from Slack before intake.
+If Slack starts without its debugging port, use **Restart Slack for A2A Notes** on the review page or `a2a-notes desktop restart-slack` (macOS).
 
 ## Checks
 

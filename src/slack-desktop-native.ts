@@ -179,6 +179,8 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
       if (input.method === 'conversations.open') valid = only('users','return_im') && U.test(a.users) && a.return_im === true;
       if (input.method === 'conversations.history') valid = only('channel','limit','latest','oldest','inclusive') && D.test(a.channel) &&
         limit(a.limit) && ts(a.latest) && ts(a.oldest) && (a.inclusive === undefined || a.inclusive === true);
+      if (input.method === 'conversations.replies') valid = only('channel','ts','limit','latest','oldest','inclusive') && D.test(a.channel) &&
+        TS.test(a.ts) && limit(a.limit) && ts(a.latest) && ts(a.oldest) && (a.inclusive === undefined || a.inclusive === true);
       if (input.method === 'users.info') valid = only('user') && U.test(a.user);
       if (input.method === 'files.info') valid = only('file') && /^F[A-Z0-9]+$/.test(a.file);
       if (input.method === 'users.list') valid = only('limit','cursor') && limit(a.limit) &&
@@ -208,7 +210,7 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
       const next = typeof r.response_metadata?.next_cursor === 'string' && r.response_metadata.next_cursor ? r.response_metadata.next_cursor.slice(0,300) : undefined;
       let data;
       if (input.method === 'conversations.info' || input.method === 'conversations.open') data = {channel:channel(r.channel)};
-      if (input.method === 'conversations.history') data = {messages:(Array.isArray(r.messages) ? r.messages.slice(0,200) : []).map(message).filter(Boolean)};
+      if (input.method === 'conversations.history' || input.method === 'conversations.replies') data = {messages:(Array.isArray(r.messages) ? r.messages.slice(0,200) : []).map(message).filter(Boolean)};
       if (input.method === 'users.info') data = {user:person(r.user)};
       if (input.method === 'files.info') {
         const f=r.file;

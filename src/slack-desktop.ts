@@ -21,7 +21,8 @@ export class DesktopUnavailableError extends TransportError {
   constructor() { super('Slack Desktop sending is unavailable before posting.', true); }
 }
 interface Event { type: 'message'; channel: string; user: string; text: string; ts: string; thread_ts?: string; bot_id?: string; app_id?: string; client_msg_id?: string }
-interface Pending { event: Event; team: string; owner: string; attempts: number; nextAt: number }
+// source 'listener' marks a frame from the in-page listener. drain reads that message back from Slack before intake.
+interface Pending { event: Event; team: string; owner: string; attempts: number; nextAt: number; source?: 'listener' }
 interface Target { id: string; type: string; url: string; webSocketDebuggerUrl: string }
 
 // Only these identifiers leave the renderer. No object containing credentials is returned.
@@ -86,6 +87,50 @@ export async function uploadSignedFile(value: string, bytes: Buffer, fetcher: ty
   if (!response.ok) throw new TransportError('The signed Slack upload failed.',response.status>=400&&response.status<500,
     0,'files.upload',response.status);
 }
+
+// Quits Slack Desktop and starts it again with its debugging port on loopback. Unsent Slack drafts stay in the app.
+// It refuses other platforms because the endpoint check uses macOS tools.
+export async function restartSlackDesktop(endpoint: URL, options: {timeoutMs?: number} = {}): Promise<void> {
+  if (process.platform !== 'darwin') throw new Error('Restarting Slack Desktop currently supports macOS.');
+  const run = promisify(execFile), deadline = Date.now() + (options.timeoutMs ?? 60_000);
+  const running = async () => { try { await run('/usr/bin/pgrep', ['-x', 'Slack'], {timeout: 3000}); return true; } catch { return false; } };
+  if (await running()) {
+    await run('/usr/bin/osascript', ['-e', 'tell application id "com.tinyspeck.slackmacgap" to quit'], {timeout: 15_000});
+    while (await running()) {
+      if (Date.now() > deadline) throw new Error('Slack did not quit. It was not started again.');
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  await run('/usr/bin/open', ['-a', '/Applications/Slack.app', '--args', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${endpoint.port}`], {timeout: 15_000});
+  for (;;) {
+    try { await verifySlackDesktopEndpoint(endpoint); return; } catch {}
+    if (Date.now() > deadline) throw new Error('Slack started, but its debugging port did not open. Quit Slack and try again.');
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+export const FRAME_BINDING = 'a2anotesDesktopFrame';
+// Adds one message listener to each open Slack socket in the renderer. It forwards only frames that can hold A2A Notes input.
+// Page code can call the binding too, so the hook reads each forwarded message back from Slack records before intake.
+export const SOCKET_LISTENER = `function() {
+  const mark = Symbol.for('a2anotes.desktop.frameListener');
+  let added = 0, open = 0;
+  for (const s of this) {
+    let host = '';
+    try { const u = new URL(s.url); if (u.protocol !== 'wss:') continue; host = u.hostname; } catch { continue; }
+    if (host !== 'slack.com' && !host.endsWith('.slack.com')) continue;
+    if (s.readyState === 1) open++;
+    if (s[mark]) continue;
+    s[mark] = true; added++;
+    s.addEventListener('message', e => {
+      const d = e.data;
+      if (typeof d !== 'string' || d.length > 64000 || !d.includes('"type":"message"')) return;
+      if (!d.includes('A2ANotes') && !d.includes('A2A Notes data') && !d.includes('A2A Reply/1 ') && !d.includes('A2A #') && !d.includes('A2A @')) return;
+      try { globalThis.${FRAME_BINDING}?.(d); } catch {}
+    });
+  }
+  return {added, open};
+}`;
 
 function slackSocket(value: unknown): boolean {
   try { const u = new URL(String(value)); return u.protocol === 'wss:' && !u.username && !u.password && (!u.port || u.port === '443') && (u.hostname === 'slack.com' || u.hostname.endsWith('.slack.com')); }
@@ -155,7 +200,7 @@ export class SlackDesktopHook {
     this.statusValue.sendEnabled = options.config.send === true;
     this.file = join(options.dir, 'desktop-events.json');
     const saved = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : [];
-    if (!Array.isArray(saved) || saved.length > 1000 || saved.some(x => !desktopEvent(x.event) || !/^T[A-Z0-9]+$/.test(x.team) || !/^[UW][A-Z0-9]+$/.test(x.owner) || !Number.isFinite(x.nextAt) || x.nextAt < 0 || !Number.isInteger(x.attempts) || x.attempts < 0))
+    if (!Array.isArray(saved) || saved.length > 1000 || saved.some(x => !desktopEvent(x.event) || !/^T[A-Z0-9]+$/.test(x.team) || !/^[UW][A-Z0-9]+$/.test(x.owner) || !Number.isFinite(x.nextAt) || x.nextAt < 0 || !Number.isInteger(x.attempts) || x.attempts < 0 || x.source !== undefined && x.source !== 'listener'))
       throw new Error('The saved desktop events could not be checked.');
     this.queue = saved;
   }
@@ -403,7 +448,7 @@ export class SlackDesktopHook {
     const verify = (foundTeam: unknown, foundOwner: unknown) => {
       verified = foundTeam === team && foundOwner === owner && this.options.identity()?.address === `slack:${team}:${owner}`;
       if (verified) this.verifiedTargets.add(target.id); else this.verifiedTargets.delete(target.id);
-      if (verified) void this.checkNative(target.id,socket,team,owner); else this.nativeTargets.delete(target.id);
+      if (verified) { void this.checkNative(target.id,socket,team,owner); void listenExisting(); } else this.nativeTargets.delete(target.id);
       this.statusValue.error = verified ? undefined : 'The desktop account could not be verified against the A2A account.';
       this.state();
     };
@@ -420,12 +465,35 @@ export class SlackDesktopHook {
         return;
       }
       if (m.id === identityRequest) { const found = m.result?.result?.value; verify(found?.team, found?.user); return; }
-      if (m.method === 'Network.webSocketCreated' && slackSocket(m.params?.url)) { trusted.add(m.params.requestId); this.state(); }
+      if (m.method === 'Runtime.bindingCalled' && m.params?.name === FRAME_BINDING && typeof m.params.payload === 'string' && m.params.payload.length <= 64_000) {
+        let frame: any; try { frame = JSON.parse(m.params.payload); } catch { return; }
+        handle(frame, 'listener'); return;
+      }
+      if (m.method === 'Network.webSocketCreated' && slackSocket(m.params?.url)) { trusted.add(m.params.requestId); this.state(); void listenExisting(); }
       if (m.method === 'Network.webSocketClosed') { trusted.delete(m.params?.requestId); this.state(); }
       if (m.method !== 'Network.webSocketFrameReceived' || !trusted.has(m.params?.requestId) || m.params?.response?.opcode !== 1) return;
       let frame: any; try { frame = JSON.parse(m.params.response.payloadData); } catch { return; }
       if (frame?.type === 'hello' && frame.self?.id && frame.team?.id) { verify(frame.team.id, frame.self.id); return; }
-      if (!verified || this.stopped || this.options.identity()?.address !== `slack:${team}:${owner}` || frame.team && frame.team !== team) return;
+      handle(frame);
+    });
+    // Sockets that opened before this connection have no Network events. The listener reaches them inside the renderer.
+    let listening = false;
+    const listenExisting = async () => {
+      if (listening || !verified || this.stopped || socket.readyState !== WebSocket.OPEN) return;
+      listening = true;
+      try {
+        const proto = await this.request(socket, 'Runtime.evaluate', {expression:'WebSocket.prototype', objectGroup:'a2anotes-sockets'});
+        const found = await this.request(socket, 'Runtime.queryObjects', {prototypeObjectId:proto.result?.objectId, objectGroup:'a2anotes-sockets'});
+        const result = await this.request(socket, 'Runtime.callFunctionOn', {objectId:found.objects?.objectId, functionDeclaration:SOCKET_LISTENER, returnByValue:true});
+        if (Number(result.result?.value?.open) > 0) trusted.add('listener'); else trusted.delete('listener');
+      } catch { trusted.delete('listener'); }
+      finally {
+        listening = false;
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({id:++this.sequence, method:'Runtime.releaseObjectGroup', params:{objectGroup:'a2anotes-sockets'}}));
+        this.state();
+      }
+    };
+    const handle = (frame: any, source?: 'listener') => {      if (!verified || this.stopped || this.options.identity()?.address !== `slack:${team}:${owner}` || frame.team && frame.team !== team) return;
       const event = desktopEvent(frame);
       if (event) {
         try {this.deliveries.echo(team,owner,event);} catch {this.statusValue.error = 'The native receipt did not match its saved delivery.';}
@@ -434,10 +502,10 @@ export class SlackDesktopHook {
       if (!event || this.queue.some(x => x.team === team && x.event.channel === event.channel && x.event.ts === event.ts)) return;
       if (this.queue.length >= 1000) { this.statusValue.error = 'The desktop event queue is full. App message recovery remains available.'; return; }
       // The existing service checks channel membership before this event receives owner acceptance.
-      this.queue.push({ event, team, owner, attempts: 0, nextAt: 0 }); this.save();
+      this.queue.push({ event, team, owner, attempts: 0, nextAt: 0, ...(source ? {source} : {}) }); this.save();
       this.statusValue.lastEventAt = new Date().toISOString(); void this.drain();
-    });
-    const check = setInterval(identityCheck, 10_000); check.unref();
+    };
+    const check = setInterval(() => { identityCheck(); void listenExisting(); }, 10_000); check.unref();
     const cleanup = () => {
       clearInterval(check);
       for (const [id, pending] of this.requests) if (pending.socket === socket) {clearTimeout(pending.timer);this.requests.delete(id);pending.reject(new TransportError('The desktop connection closed.', false));}
@@ -449,7 +517,18 @@ export class SlackDesktopHook {
     if (this.stopped) { socket.terminate(); return; }
     socket.send(JSON.stringify({ id: ++this.sequence, method: 'Network.enable', params: {} }));
     socket.send(JSON.stringify({id:++this.sequence,method:'Runtime.enable',params:{}}));
+    socket.send(JSON.stringify({id:++this.sequence,method:'Runtime.addBinding',params:{name:FRAME_BINDING}}));
     identityCheck();
+  }
+  // Reads the exact message back through the app API. Thread replies need conversations.replies.
+  private async recordMatches(item: Pending) {
+    const e = item.event, thread = !!e.thread_ts && e.thread_ts !== e.ts;
+    const range = {latest: e.ts, oldest: e.ts, inclusive: true, limit: 1};
+    const found = await this.read({team: item.team, owner: item.owner, method: thread ? 'conversations.replies' : 'conversations.history',
+      args: thread ? {channel: e.channel, ts: e.thread_ts, ...range} : {channel: e.channel, ...range}});
+    const record = (Array.isArray(found?.messages) ? found.messages : []).find((m: any) => m.ts === e.ts);
+    return !!record && record.user === e.user && record.text === e.text && (record.thread_ts || undefined) === e.thread_ts &&
+      !!record.bot_id === !!e.bot_id && !!record.app_id === !!e.app_id;
   }
   private async drain() {
     if (this.stopped || this.draining) return;
@@ -464,6 +543,10 @@ export class SlackDesktopHook {
           const self = this.channels.get(key)!;
           const e = item.event;
           if (e.user === item.owner && (!self || e.text.startsWith('A2ANotes') || e.text.includes(DATA_MARKER)) || self && (e.user !== item.owner || e.app_id || e.bot_id)) { this.queue = this.queue.filter(x => x !== item); this.save(); continue; }
+          if (item.source === 'listener' && !await this.recordMatches(item)) {
+            this.queue = this.queue.filter(x => x !== item); this.save();
+            this.statusValue.error = 'A desktop event did not match its Slack record and was ignored.'; continue;
+          }
           const read = readSlackText(e.text);
           await this.options.receive({ conversation: `slack:${item.team}:${e.channel}`, ref: `slack:${item.team}:${e.channel}:${e.ts}`, ts: e.ts,
             channel: e.channel, sender: `slack:${item.team}:${e.user}`, text: 'text' in read ? read.text : e.text, ...('error' in read ? {error: read.error} : {}), ownerConversation: self,

@@ -10,7 +10,7 @@ import { commandBodyChecker, commandReviewer } from './checks.ts';
 import { startHttp } from './http.ts';
 import { NotesService } from './service.ts';
 import { SlackTransport, type SlackConfig } from './slack.ts';
-import { SlackDesktopHook, desktopURL, type DesktopConfig } from './slack-desktop.ts';
+import { SlackDesktopHook, desktopURL, restartSlackDesktop, type DesktopConfig } from './slack-desktop.ts';
 import type { Transport } from './transport.ts';
 import { savePrivate, Store } from './store.ts';
 
@@ -93,7 +93,7 @@ export async function startService(dir: string, overrides: Partial<Config> = {},
     const secretFile = join(dir, 'local-secret');
     const secret = randomBytes(32).toString('base64url');
     savePrivate(secretFile, secret);
-    const server = await startHttp({ service, clients, port: config.port, host: config.host, ...(slack instanceof SlackTransport ? {slack} : {}), onStop,
+    const server = await startHttp({ service, clients, port: config.port, host: config.host, ...(slack instanceof SlackTransport ? {slack, restartSlack: () => restartSlackDesktop(desktopURL(config.desktop?.url || config.slack.desktopUrl || 'http://127.0.0.1:19322'))} : {}), onStop,
       local: given => { const a = Buffer.from(given), b = Buffer.from(secret); return a.length === b.length && timingSafeEqual(a, b); } });
     service.start(); desktop?.start();
     savePrivate(join(dir, 'service.json'), { url: server.url, pid: process.pid, started: new Date().toISOString() });

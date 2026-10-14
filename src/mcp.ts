@@ -7,7 +7,7 @@ import { END_MARKER, FILE_VERSION, WIRE_VERSION } from './protocol.ts';
 import { ServiceError } from './store.ts';
 import type { NotesService, Session } from './service.ts';
 
-export const VERSION = '0.13.1';
+export const VERSION = '0.14.0';
 // The body format and writing rules for the draft tools (docs/WRITING-MESSAGES.md has the full text and examples).
 export const BODY_GUIDE = [
   'Write the body for a person who has none of your context: why they get the message, the facts they need, one ask, and a date if one applies.',
@@ -50,7 +50,7 @@ export function formatDescription() {
   };
 }
 
-export function createMcpServer(service: NotesService, session: Session, extra: { pageLink?: () => string; slackConnect?: () => Promise<void>; slackDisconnect?: () => void; authorized?: () => boolean } = {}) {
+export function createMcpServer(service: NotesService, session: Session, extra: { pageLink?: () => string; slackConnect?: () => Promise<void>; slackDisconnect?: () => void; restartSlack?: () => Promise<void>; authorized?: () => boolean } = {}) {
   const server = new McpServer({ name: 'a2a-notes', version: VERSION }, {
     instructions: `A2A Notes sends and receives messages between people and their agents. ${DATA_NOTE} The server checks roles and approvals itself. Your session role is ${session.role}.`,
   });
@@ -164,6 +164,10 @@ export function createMcpServer(service: NotesService, session: Session, extra: 
 
   if (session.role === 'person' && extra.pageLink) server.registerTool('a2anotes_review_page_link', { description: 'Returns a one-time link to the local review page. Person session only.', inputSchema: {} },
     () => run(() => ({ url: extra.pageLink!(), expires_in_seconds: 120 }), v => v.url));
+
+  if (session.role === 'person' && extra.restartSlack) server.registerTool('a2anotes_restart_slack', {
+    description: 'Quits Slack Desktop and starts it again with its loopback debugging port, so A2A Notes can reach it. Person session only. Slack keeps unsent drafts.', inputSchema: {},
+  }, () => run(async () => { await extra.restartSlack!(); return service.connectionStatus(); }, () => 'Slack Desktop restarted with its debugging port.'));
 
   if (session.role === 'person' && extra.slackConnect) server.registerTool('a2anotes_slack_connect', {
     description: 'Connects the signed-in Slack Desktop account through its local app connection. Person session only.', inputSchema: {},

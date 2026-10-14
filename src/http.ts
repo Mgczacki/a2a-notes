@@ -11,7 +11,9 @@ import type { NotesService, Session } from './service.ts';
 import type { Clients } from './clients.ts';
 import type { SlackTransport } from './slack.ts';
 
-export interface HttpOptions { service: NotesService; clients: Clients; port: number; host?: string; slack?: SlackTransport; local?: (secret: string) => boolean; onStop?: () => void }
+export interface HttpOptions { service: NotesService; clients: Clients; port: number; host?: string; slack?: SlackTransport; local?: (secret: string) => boolean; onStop?: () => void;
+  // Restarts Slack Desktop with its debugging port. Person sessions only.
+  restartSlack?: () => Promise<void> }
 const MAX_BODY = 16 * 1024 * 1024;
 
 function readBody(req: IncomingMessage): Promise<unknown> {
@@ -67,7 +69,8 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
       const server = createMcpServer(service, session, { pageLink, authorized: () => {
         const current = clients.session(authorization);
         return !!current && current.name === session.name && current.role === session.role && current.humanApproval === session.humanApproval;
-      }, ...(options.slack ? { slackConnect: () => options.slack!.connect(), slackDisconnect: () => options.slack!.disconnect() } : {}) });
+      }, ...(options.slack ? { slackConnect: () => options.slack!.connect(), slackDisconnect: () => options.slack!.disconnect() } : {}),
+        ...(options.restartSlack ? { restartSlack: options.restartSlack } : {}) });
       // Interactive clients need a persistent connection for the form response.
       // Existing clients retain the stateless endpoint and its JSON responses.
       const initialization = isInitializeRequest(body) ? InitializeRequestSchema.safeParse(body) : undefined;
@@ -144,6 +147,10 @@ export function startHttp(options: HttpOptions): Promise<Server & { url: string 
       await options.slack.connect(); return reply({identity: service.identity()});
     }
     if (req.method === 'POST' && url.pathname === '/api/slack/disconnect') { options.slack?.disconnect(); return reply({ ok: true }); }
+    if (req.method === 'POST' && url.pathname === '/api/desktop/restart-slack') {
+      if (session.role !== 'person' || !options.restartSlack) throw new ServiceError('forbidden', 'Only the person can restart Slack Desktop.');
+      await options.restartSlack(); return reply({ ok: true });
+    }
     throw new ServiceError('not_found', 'Not found.');
   };
 

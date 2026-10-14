@@ -7,7 +7,7 @@ import { Clients, ROLES } from './clients.ts';
 import { runBridge } from './bridge.ts';
 import { startFakeSlack } from './fake-slack.ts';
 import { savePrivate, type Role } from './store.ts';
-import { SlackDesktopHook, desktopURL } from './slack-desktop.ts';
+import { SlackDesktopHook, desktopURL, restartSlackDesktop } from './slack-desktop.ts';
 import { SlackTransport } from './slack.ts';
 
 const args = process.argv.slice(2);
@@ -24,6 +24,7 @@ const usage = `a2a-notes <command>
   desktop enable --url http://127.0.0.1:P  save the optional Slack Desktop endpoint
   desktop disable                         remove the endpoint from config
   desktop probe --url URL [--seconds 30]   check the installed app without delivering notes
+  desktop restart-slack                   quit Slack Desktop and start it with its debugging port (macOS)
   stop                                    stop the running service
   bridge [--url URL]                      stdio MCP bridge; reads the token from A2A_NOTES_TOKEN
   service-file                            print a macOS LaunchAgent file that starts the service at sign-in
@@ -94,7 +95,10 @@ switch (cmd) {
         await new Promise(resolve => setTimeout(resolve, seconds * 1000));
         console.log(JSON.stringify({ ...hook.status(), app: slack.viewStatus(), events, delivered: false }, null, 2));
       } finally { await hook.close(); rmSync(temporary, { recursive: true, force: true }); }
-    } else throw new Error('Use desktop enable, disable, or probe.');
+    } else if (sub === 'restart-slack') {
+      await restartSlackDesktop(desktopURL(config.desktop?.url || config.slack?.desktopUrl || 'http://127.0.0.1:19322'));
+      console.log('Slack Desktop restarted with its loopback debugging port.');
+    } else throw new Error('Use desktop enable, disable, probe, or restart-slack.');
     break;
   }
   case 'bridge': {

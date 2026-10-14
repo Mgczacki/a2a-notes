@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.0
+
+- Listen to Slack sockets that opened before A2A Notes started. Slack needs no restart after A2A Notes restarts.
+- Read each listener message back with `conversations.history` or `conversations.replies`. A message that does not match its Slack record is ignored.
+- Add `conversations.replies` to the permitted background reads.
+- Add `a2a-notes desktop restart-slack`, a review page button, and the person-only MCP tool `a2anotes_restart_slack` to restart Slack with its debugging port on macOS.
+
 ## 0.13.1
 
 - Post file notes with the formatted display blocks. Complete files privately, post the note, and attach the files with `chat.update`.

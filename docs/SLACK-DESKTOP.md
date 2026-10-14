@@ -29,7 +29,16 @@ Disconnect does not sign out the Slack app.
 
 The connector verifies the debugging port owner before it connects.
 It observes events from native Slack sockets for the bound workspace and account.
-Restart Slack while A2A Notes listens if no new native socket is visible.
+A socket that opened before A2A Notes started has no network events.
+For those sockets, the connector adds one listener inside the app page through `Runtime.queryObjects`.
+The listener forwards only message frames that can hold A2A Notes input.
+Page code can call that listener binding, so the connector reads each forwarded message back with `conversations.history` or `conversations.replies`.
+The sender, conversation, thread, and text must match the Slack record before intake.
+Slack needs no restart after A2A Notes restarts.
+
+Slack must start with its debugging port. A Slack update, a reboot, or a manual restart starts it without the port.
+Use `a2a-notes desktop restart-slack`, the review page button, or the person-only MCP tool `a2anotes_restart_slack` to restart it with the port.
+This restart supports macOS only. Slack keeps unsent drafts.
 Each pending event enters `desktop-events.json` before intake.
 The adapter checks the direct message conversation with `conversations.info`.
 Ordinary text supplies no instruction or approval.
