@@ -182,8 +182,9 @@ It never changes the open conversation, types in the composer, or clicks a Slack
 It confirms the recipient with `conversations.open` and `users.info`.
 
 The adapter saves `postStarted` before it posts text through `chat.postMessage`.
-For a note with files, it saves `postStarted` before `files.completeUploadExternal` shares the files and note text.
+A note with files is posted the same way. The adapter then attaches the privately completed files with `chat.update`.
 Slack must show the matching message ID and files before delivery becomes `sent`.
+A later attempt only attaches the files to the posted note.
 After an uncertain post, the adapter searches recent conversation records for that message ID.
 It never repeats an uncertain post.
 
@@ -193,7 +194,7 @@ Existing queue records remain readable.
 Agent request data travels inline in the original message, with a 26,000-byte limit.
 The signed-in app grants each supporting file an upload URL.
 The adapter sends only the checked bytes to that Slack URL, without a cookie or token.
-It then shares the file through the app's native client.
+It completes the file privately, posts the formatted note, and then attaches the file to that note.
 Slack shows the file as an attachment, with a 2 MiB adapter limit per file.
 The adapter checks the original sender and message reference before it returns file bytes through the app.
 It reads attachment metadata with `files.info` before download.

@@ -67,10 +67,14 @@ The app client grants an upload URL for each file.
 The adapter checks that the URL uses HTTPS and the `files.slack.com` host.
 It sends the staged bytes without a cookie, token, or Authorization header.
 The request refuses redirects and stops after 30 seconds.
-The adapter saves the file ID and upload phase before it shares the file.
+The adapter saves the file ID and upload phase.
 It does not save the upload URL.
-The app client shares the files with the note text through `files.completeUploadExternal`.
-The adapter checks the message ID and each file name and size in Slack records.
+The app client completes each file privately through `files.completeUploadExternal`, without a channel.
+The app client then posts the formatted note through `chat.postMessage`.
+The adapter saves the note timestamp as `postedTs`.
+The app client attaches the files to that note through `chat.update` with the same text and blocks.
+Slack can show the note as edited.
+The adapter checks the note timestamp and each file name and size in Slack records.
 The protocol checks each downloaded file hash.
 Draft creation, revision, and approval reject files above the active limits.
 After correcting a failure before posting, use `a2anotes_retry_send` with the existing note ID and hash.
@@ -94,8 +98,7 @@ Native posting is the only posting path.
 Unavailability before posting stops the note before posting. Use `a2anotes_retry_send` after Slack is ready.
 Invalid credentials and policy failures stop the native operation.
 Text notes use the existing display blocks.
-File notes use the same note text as the file share comment.
-Slack ignores blocks when that comment is present.
+File notes use the same display blocks. The hidden text keeps the A2A Notes data.
 The signed binary file upload is the only direct Slack HTTP call.
 
 Without `--send`, A2A Notes reads and confirms receipt, but it does not post notes or delivery notices.
@@ -104,6 +107,7 @@ Closing the debugger connection does not permit another post for an uncertain no
 
 An outgoing note with saved Web API upload progress stops before the app adapter posts.
 Recover that unfinished operation with the earlier adapter before migrating it.
-A lost binary upload starts with a new ticket because no file share has occurred.
-After an uncertain file share, the adapter searches Slack records for the note ID and all expected files.
-It does not call `files.completeUploadExternal` a second time.
+A lost binary upload or a failed private completion starts with a new ticket. The earlier file stays private.
+After the note is posted, a later attempt only attaches the saved files. It never posts the note again.
+After an uncertain post, the adapter searches Slack records for the note ID.
+If the note has no files yet, the service saves its timestamp and attaches the files.

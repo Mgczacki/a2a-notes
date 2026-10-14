@@ -19,8 +19,9 @@ export interface DesktopPost {
 export interface DesktopRead { team: string; owner: string; method: string; args: Record<string, unknown> }
 export interface DesktopReaction { team: string; owner: string; channel: string; ts: string; name: string }
 export interface DesktopFile {
-  team: string; owner: string; operation: 'ticket' | 'complete';
-  channel?: string; messageId?: string; text?: string; threadTs?: string;
+  // complete shares nothing. attach adds completed files to the posted note with chat.update.
+  team: string; owner: string; operation: 'ticket' | 'complete' | 'attach';
+  channel?: string; ts?: string; messageId?: string; text?: string; blocks?: string;
   name?: string; length?: number;
   files?: {id: string; title: string}[];
 }
@@ -242,18 +243,23 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
           return {error:'native_invalid_payload',definite:true};
         method='files.getUploadURLExternal';args={filename:input.name,length:input.length};
       } else if (input.operation==='complete') {
-        if (!D.test(input.channel) || !/^[a-f0-9-]{36}$/i.test(input.messageId) || typeof input.text!=='string' ||
-          input.text.length>39000 || !input.text.includes('A2A Notes data: ') ||
-          !Array.isArray(input.files) || input.files.length<1 || input.files.length>5 ||
-          input.files.some(f=>!F.test(f?.id)||!name(f?.title)) || input.threadTs && !TS.test(input.threadTs))
+        // Private completion: the file belongs to the account and is not shared to any conversation.
+        if (!Array.isArray(input.files) || input.files.length<1 || input.files.length>5 ||
+          input.files.some(f=>!F.test(f?.id)||!name(f?.title)) || input.channel!==undefined || input.text!==undefined)
           return {error:'native_invalid_payload',definite:true};
-        const marker=input.text.indexOf('A2A Notes data: ');
-        let wire;
-        try {wire=JSON.parse(input.text.slice(marker+'A2A Notes data: '.length));}catch{return {error:'native_invalid_payload',definite:true};}
-        if (typeof wire!=='string' || !wire.startsWith('A2ANotes/1\\nID: '+input.messageId+'\\n'))
+        method='files.completeUploadExternal';args={files:input.files};
+      } else if (input.operation==='attach') {
+        if (!D.test(input.channel) || !TS.test(input.ts) || !/^[a-f0-9-]{36}$/i.test(input.messageId) || typeof input.text!=='string' ||
+          input.text.length>39000 || !input.text.includes('A2A Notes data: ') || typeof input.blocks!=='string' ||
+          !Array.isArray(input.files) || input.files.length<1 || input.files.length>5 || input.files.some(f=>!F.test(f?.id)||!name(f?.title)))
           return {error:'native_invalid_payload',definite:true};
-        method='files.completeUploadExternal';args={files:input.files,channel_id:input.channel,initial_comment:input.text,
-          ...(input.threadTs?{thread_ts:input.threadTs}:{})};
+        const raw=input.text.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+        const marker=raw.indexOf('A2A Notes data: ');
+        let wire,blocks;
+        try {wire=JSON.parse(raw.slice(marker+'A2A Notes data: '.length));blocks=JSON.parse(input.blocks);}catch{return {error:'native_invalid_payload',definite:true};}
+        if (typeof wire!=='string' || !wire.startsWith('A2ANotes/1\\nID: '+input.messageId+'\\n') || !Array.isArray(blocks) || blocks.length>50)
+          return {error:'native_invalid_payload',definite:true};
+        method='chat.update';args={channel:input.channel,ts:input.ts,text:input.text,blocks:input.blocks,file_ids:input.files.map(f=>f.id)};
       } else return {error:'native_invalid_payload',definite:true};
       const original=queue.q,own=Object.getOwnPropertyDescriptor(queue,'q');
       const controller=new AbortController();timer=setTimeout(()=>controller.abort(),20000);
@@ -263,9 +269,10 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
           if(candidate.method!==method) return original.call(this,candidate,expedited);
           const actual=candidate.args||{};
           if(input.operation==='ticket' && (actual.filename!==input.name || Number(actual.length)!==input.length) ||
-             input.operation==='complete' && (actual.channel_id!==input.channel || actual.initial_comment!==input.text ||
-               JSON.stringify(actual.files)!==JSON.stringify(input.files) ||
-               (actual.thread_ts||undefined)!==(input.threadTs||undefined)))
+             input.operation==='complete' && (JSON.stringify(actual.files)!==JSON.stringify(input.files) ||
+               actual.channel_id!==undefined || actual.channels!==undefined || actual.initial_comment!==undefined) ||
+             input.operation==='attach' && (actual.channel!==input.channel || actual.ts!==input.ts || actual.text!==input.text ||
+               actual.blocks!==input.blocks || JSON.stringify(actual.file_ids)!==JSON.stringify(input.files.map(f=>f.id))))
             throw new Error('native_interface_changed');
           const attempts=Object.getOwnPropertyDescriptor(candidate,'_maxAttempts');
           if(!attempts?.writable||!Number.isInteger(attempts.value)||candidate._numberOfAttempts!==0)
@@ -281,6 +288,8 @@ export function nativeFunctions(pins: Record<string, string> = NATIVE_PINS) {
         if(!F.test(result.file_id)||!validUrl(result.upload_url))return {error:'native_delivery_uncertain',definite:false};
         return {ok:true,fileId:result.file_id,url:result.upload_url};
       }
+      if(input.operation==='attach')
+        return result.channel===input.channel&&result.ts===input.ts?{ok:true,channel:input.channel,ts:input.ts}:{error:'native_delivery_uncertain',definite:false};
       const ids=(Array.isArray(result.files)?result.files:[]).map(f=>f.id);
       return input.files.every(f=>ids.includes(f.id))?{ok:true}:{error:'native_delivery_uncertain',definite:false};
     }catch(error){

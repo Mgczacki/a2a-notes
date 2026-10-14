@@ -683,7 +683,8 @@ export class NotesService {
         x.state = 'sending'; x.sendStartedAt ||= this.at(); x.sendName ||= identity.name; x.delivery!.attempts++;
         this.store.audit(d, delivery.actor, 'send_attempt', id);
       });
-      if (delivery.uncertain || n.checkpoint?.postStarted) {
+      // A note with postedTs is posted, and the next attempt only attaches its files.
+      if ((delivery.uncertain || n.checkpoint?.postStarted) && !n.checkpoint?.postedTs) {
         const found = await this.transport.findSent(n.to, n.messageId, n.sendStartedAt, {
           cursor: n.checkpoint?.reconcileCursor,
           expectedFiles: files.filter(f => f.kind === 'support').map(f => ({name: f.name, size: f.size})),
@@ -692,7 +693,9 @@ export class NotesService {
             x.checkpoint.reconcileCursor = cursor;
           }),
         });
-        if (found) {
+        if (found?.filesMissing) {
+          this.store.update(id, x => { x.checkpoint ||= { uploads: {}, postStarted: true }; x.checkpoint.postedTs = found.ts; x.checkpoint.channel ||= found.channel; });
+        } else if (found) {
           this.store.update(id, (x, d) => {
             x.state = 'sent'; x.sentAt = this.at(); delete x.error; delete x.delivery!.nextAttemptAt;
             const uploaded = Object.fromEntries(Object.entries(x.checkpoint?.uploads || {}).filter(([, u]) => u.phase === 'complete').map(([key, u]) => [key, u.fileId]));
@@ -700,12 +703,12 @@ export class NotesService {
             this.store.audit(d, 'service', 'send_found', id);
           }); return;
         }
-        throw new TransportError('Slack has not confirmed delivery. No second post was attempted.', false, 0, 'conversations.history');
+        else throw new TransportError('Slack has not confirmed delivery. No second post was attempted.', false, 0, 'conversations.history');
       }
       const agentFile = files.find(f => f.kind === 'agent');
       const result = await this.transport.send({
         to: n.to, messageId: n.messageId, threadTs: n.transport?.threadTs,
-        checkpoint: n.checkpoint || { uploads: {} },
+        checkpoint: this.store.note(id)!.checkpoint || { uploads: {} },
         saveCheckpoint: checkpoint => this.store.update(id, (x, current) => {
           if (this.stopping) throw new ServiceError('service_stopping', 'The service is stopping. Saved progress remains available.');
           if (x.hash !== delivery.hash || !this.approvalValid(x, current) || noteHash(x, this.files(current, x)) !== delivery.hash)

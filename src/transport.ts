@@ -59,7 +59,7 @@ export interface Transport {
   // Send a fixed delivery notice. It grants no authority and contains no message body.
   notifyDelivery?(reference: Record<string, string>, status: AgentDeliveryStatus): Promise<void>;
   // looks for a message that this account sent with this ID, after a send that may or may not have posted
-  findSent(to: string, messageId: string, since?: string, progress?: { cursor?: string; save: (cursor?: string) => void; expectedFiles?: {name: string; size: number}[] }): Promise<{ channel: string; ts: string } | null>;
+  findSent(to: string, messageId: string, since?: string, progress?: { cursor?: string; save: (cursor?: string) => void; expectedFiles?: {name: string; size: number}[] }): Promise<{ channel: string; ts: string; filesMissing?: boolean } | null>;
   // reads messages newer than each saved cursor, oldest first. handle stores and checks one message; the adapter
   // calls save after handle returns, so a failed message is read again at the next scan.
   scan(cursors: Record<string, string>, handle: (m: Received) => Promise<void>, save: (conversation: string, ts: string) => void, threads?: { channel: string; ts: string }[]): Promise<{ conversations: number; messages: number }>;

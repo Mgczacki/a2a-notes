@@ -63,14 +63,23 @@ test('native file ticket and completion use one SDK attempt with exact note data
   const id=randomUUID(),text=slackText(encode({id,from:`slack:TEXAMPLE:${MARIO}`,to:`slack:TEXAMPLE:${ALEX}`,
     subject:'Report',audience:'person',threadId:id,replyTo:null,body:'Read.',files:[],transportFiles:{}}),
     {subject:'Report',body:'Read.',audience:'person',senderName:'Mario',files:[]});
-  const complete=await f.invoke({...base,operation:'complete',channel:'DTEST',messageId:id,text,
-    files:[{id:'FTEST01',title:'report.md'}]},f.functions.file);
+  const complete=await f.invoke({...base,operation:'complete',files:[{id:'FTEST01',title:'report.md'}]},f.functions.file);
   assert.equal(complete.ok,true);assert.equal(f.calls[1].method,'files.completeUploadExternal');assert.equal(f.calls[1].attempts,1);
-  assert.equal(f.calls[1].args.initial_comment,text);assert.equal(f.calls[1].args.channel_id,'DTEST');
-  const invalid=nativeFixture();
-  assert.equal((await invalid.invoke({...base,operation:'complete',channel:'COTHER',messageId:id,text,
-    files:[{id:'FTEST01',title:'report.md'}]},invalid.functions.file)).definite,true);
-  assert.equal(invalid.calls.length,0);
+  assert.equal(f.calls[1].args.channel_id,undefined);assert.equal(f.calls[1].args.initial_comment,undefined);
+  const blocks=JSON.stringify([{type:'header',text:{type:'plain_text',text:'Report'}}]);
+  const attach=await f.invoke({...base,operation:'attach',channel:'DTEST',ts:'100.0001',messageId:id,text,blocks,
+    files:[{id:'FTEST01',title:'report.md'}]},f.functions.file);
+  assert.equal(attach.ok,true);assert.equal(f.calls[2].method,'chat.update');assert.equal(f.calls[2].attempts,1);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[2].args.file_ids)),['FTEST01']);assert.equal(f.calls[2].args.text,text);
+  assert.equal(f.calls[2].args.blocks,blocks);
+  for(const bad of [{operation:'complete',channel:'DTEST',files:[{id:'FTEST01',title:'report.md'}]},
+    {operation:'attach',channel:'COTHER',ts:'100.0001',messageId:id,text,blocks,files:[{id:'FTEST01',title:'report.md'}]},
+    {operation:'attach',channel:'DTEST',ts:'100.0001',messageId:randomUUID(),text,blocks,files:[{id:'FTEST01',title:'report.md'}]},
+    {operation:'attach',channel:'DTEST',ts:'100.0001',messageId:id,text,blocks:'not json',files:[{id:'FTEST01',title:'report.md'}]}]){
+    const invalid=nativeFixture();
+    assert.equal((await invalid.invoke({...base,...bad} as any,invalid.functions.file)).definite,true);
+    assert.equal(invalid.calls.length,0);
+  }
 });
 test('native file errors return Retry-After and classify Slack errors without exposing request data',async()=>{
   const ticket={team:'TEXAMPLE',owner:MARIO,operation:'ticket',name:'report.md',length:100};
@@ -249,7 +258,7 @@ test('file completion saves a 429 deadline and checks it after restart',async t=
   const options={dir,config:{url:remote.url,send:true},identity:()=>({transport:'slack',address:`slack:TEXAMPLE:${MARIO}`,name:'Mario',scopes:[],missingScopes:[],optionalMissing:[]}),
     verifyEndpoint:async()=>{},verifyChannel:async()=>false,receive:async()=>{}};
   let hook=new SlackDesktopHook(options);t.after(()=>hook.close());hook.start();await wait(()=>hook.canSend());
-  const file={team:'TEXAMPLE',owner:MARIO,channel:'DTEST',messageId:randomUUID(),text:'A2A Notes data: x',files:[{id:'FTEST01',title:'report.md'}]};
+  const file={team:'TEXAMPLE',owner:MARIO,files:[{id:'FTEST01',title:'report.md'}]};
   await assert.rejects(hook.completeFile(file),e=>e instanceof TransportError&&e.status===429&&e.retryAfter===70&&e.requestId==='file-request');
   assert.equal(remote.files.length,1);
   await hook.close();hook=new SlackDesktopHook(options);hook.start();await wait(()=>hook.canSend());

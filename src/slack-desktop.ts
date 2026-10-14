@@ -150,7 +150,7 @@ export class SlackDesktopHook {
       throw new Error('The saved reaction rate limits could not be checked.');
     this.fileLimitsFile = join(options.dir, 'desktop-file-limits.json');
     this.fileLimits = existsSync(this.fileLimitsFile) ? JSON.parse(readFileSync(this.fileLimitsFile, 'utf8')) : {};
-    if (!this.fileLimits || Array.isArray(this.fileLimits) || Object.entries(this.fileLimits).some(([key, at]) => !/^T[A-Z0-9]+:(ticket|complete)$/.test(key) || !Number.isFinite(at) || at < 0))
+    if (!this.fileLimits || Array.isArray(this.fileLimits) || Object.entries(this.fileLimits).some(([key, at]) => !/^T[A-Z0-9]+:(ticket|complete|attach)$/.test(key) || !Number.isFinite(at) || at < 0))
       throw new Error('The saved file rate limits could not be checked.');
     this.statusValue.sendEnabled = options.config.send === true;
     this.file = join(options.dir, 'desktop-events.json');
@@ -271,7 +271,7 @@ export class SlackDesktopHook {
   private async callFile(input: DesktopFile): Promise<NativeResult & {fileId?: string; url?: string}> {
     if (this.options.identity()?.address !== `slack:${input.team}:${input.owner}`)
       throw new TransportError('The native file account changed.', true);
-    const method = input.operation === 'complete' ? 'files.completeUploadExternal' : 'files.getUploadURLExternal';
+    const method = input.operation === 'complete' ? 'files.completeUploadExternal' : input.operation === 'attach' ? 'chat.update' : 'files.getUploadURLExternal';
     const limitKey = `${input.team}:${input.operation}`;
     const limited = this.fileLimits[limitKey] || 0;
     if (limited > Date.now()) throw new TransportError(`Slack Desktop is waiting after a ${method} rate limit.`, true,
@@ -303,8 +303,13 @@ export class SlackDesktopHook {
     await uploadSignedFile(ticket.url,input.bytes,this.options.uploadFetcher||fetch);
     return ticket.fileId;
   }
-  async completeFile(input: Omit<DesktopFile,'operation'>) {
+  // Completes uploaded files without sharing them.
+  async completeFile(input: {team:string;owner:string;files:{id:string;title:string}[]}) {
     return this.callFile({...input,operation:'complete'});
+  }
+  // Adds completed files to the posted note. The text and blocks stay the approved note.
+  async attachFiles(input: Omit<DesktopFile,'operation'|'name'|'length'>) {
+    return this.callFile({...input,operation:'attach'});
   }
   // Posts one fixed delivery notice. The operation ID becomes the Slack client message ID.
   async notice(input: {team: string; owner: string; channel: string; operationId: string; text: string}) {

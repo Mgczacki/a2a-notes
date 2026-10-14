@@ -16,6 +16,10 @@ const MAX_SCAN_CONVERSATIONS = 20;
 export const OPTIONAL_SCOPES: string[] = [];
 export const MAX_APP_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 export const MAX_INLINE_ATTACHMENT_BYTES = 26_000;
+// Inline data uses APP hashes. Slack files use F IDs and finish private completion before the note is posted.
+// Progress from the older Web API adapter always has a url and is refused.
+const savedUpload = (u: {fileId: string; phase: string; url?: string}) => u.phase === 'complete' && /^APP[a-f0-9]{64}$/.test(u.fileId) ||
+  ['allocated','uploaded','complete'].includes(u.phase) && /^F[A-Z0-9]+$/.test(u.fileId) && u.url === undefined;
 export interface SlackConfig {
   teamId: string; desktopUrl?: string; acknowledgementEmoji?: string; allowSelf?: boolean; projectLink?: string;
   // Old settings remain readable for rollback. The app transport ignores them.
@@ -32,7 +36,7 @@ export function parseSlackAddress(address: string) {
 }
 interface Binding {team: string; user: string; name: string}
 export class SlackTransport implements Transport {
-  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'> & Partial<Pick<SlackDesktopHook, 'status' | 'react' | 'notice' | 'read' | 'canRead' | 'uploadFile' | 'completeFile'>>;
+  desktopSender?: Pick<SlackDesktopHook, 'canSend' | 'post'> & Partial<Pick<SlackDesktopHook, 'status' | 'react' | 'notice' | 'read' | 'canRead' | 'uploadFile' | 'completeFile' | 'attachFiles'>>;
   readonly name = 'slack'; readonly fileField = 'Slack';
   private binding?: Binding;
   private verified = false;
@@ -153,9 +157,7 @@ export class SlackTransport implements Transport {
   async verifyRetry(to: string, messageId: string, checkpoint: SendCheckpoint) {
     const {team} = parseSlackAddress(to);
     if (team !== this.config.teamId || checkpoint.postStarted || !/^D[A-Z0-9]+$/.test(checkpoint.channel || '') ||
-        Object.values(checkpoint.uploads).some(u => u.phase === 'completing' ||
-          !(u.phase === 'complete' && /^APP[a-f0-9]{64}$/.test(u.fileId) ||
-            ['allocated','uploaded'].includes(u.phase) && /^F[A-Z0-9]+$/.test(u.fileId))))
+        Object.values(checkpoint.uploads).some(u => !savedUpload(u)))
       throw new TransportError('Saved post or file progress does not permit this retry.', true);
     await this.run(async (_app, s) => {
       new DesktopDeliveries(dirname(this.file)).verifyRetry(s.team, s.user, to, messageId, checkpoint.channel!);
@@ -180,10 +182,8 @@ export class SlackTransport implements Transport {
   }
   checkDraft(input: SendInput) {this.formatSend(input);}
   async send(input: SendInput) {
-    if(input.checkpoint?.postStarted)throw new TransportError('The earlier post must be reconciled before another send.',true);
-    if(Object.values(input.checkpoint?.uploads||{}).some(u=>u.phase==='completing'||
-      !(u.phase==='complete'&&/^APP[a-f0-9]{64}$/.test(u.fileId)||
-        ['allocated','uploaded'].includes(u.phase)&&/^F[A-Z0-9]+$/.test(u.fileId))))
+    if(input.checkpoint?.postStarted&&!input.checkpoint.postedTs)throw new TransportError('The earlier post must be reconciled before another send.',true);
+    if(Object.values(input.checkpoint?.uploads||{}).some(u=>!savedUpload(u)))
       throw new TransportError('Saved file progress requires reconciliation before another send.',true);
     const {files,inline,support,text}=this.formatSend(input);
     const {team,user}=parseSlackAddress(input.to);
@@ -206,44 +206,63 @@ export class SlackTransport implements Transport {
       catch{throw notReady();}
       if(!sender.canSend())throw notReady();
       if(support.length){
-        if(!sender.uploadFile||!sender.completeFile)throw notReady();
-        const uploaded:{id:string;title:string}[]=[];
-        for(const f of support){
-          const fileId=await sender.uploadFile({team:s.team,owner:s.user,name:f.name,bytes:f.bytes},id=>{
-            checkpoint.uploads[f.id]={fileId:id,phase:'allocated'};input.saveCheckpoint?.(checkpoint);
-          });
-          checkpoint.uploads[f.id].phase='uploaded';input.saveCheckpoint?.(checkpoint);
-          uploaded.push({id:fileId,title:f.name});
-        }
-        if(this.disabled||this.binding?.team!==s.team||this.binding?.user!==s.user)
-          throw new TransportError('The Slack app account changed before posting.',true);
-        if(checkpoint.channel!==channel||support.some((f,i)=>checkpoint.uploads[f.id]?.fileId!==uploaded[i]?.id))
-          throw new TransportError('The saved file IDs or direct conversation changed before posting.',true);
-        checkpoint.postTransport='desktop';checkpoint.postStarted=true;
-        for(const f of support)checkpoint.uploads[f.id].phase='completing';
-        input.saveCheckpoint?.(checkpoint);
-        try {
-          await sender.completeFile({team:s.team,owner:s.user,channel,messageId:input.messageId,text,files:uploaded,
-            ...(input.threadTs?{threadTs:input.threadTs}:{})});
-        } catch(error) {
-          if(error instanceof TransportError&&error.definite){
-            checkpoint.postStarted=false;
-            for(const f of support)checkpoint.uploads[f.id].phase='uploaded';
+        if(!sender.uploadFile||!sender.completeFile||!sender.attachFiles)throw notReady();
+        const blocks=JSON.stringify(slackBlocks(input.display,{projectLink:this.config.projectLink}));
+        let ts=checkpoint.postedTs;
+        if(!ts){
+          // Upload and complete each file privately. Nothing is shared before the note is posted.
+          for(const f of support){
+            if(checkpoint.uploads[f.id]?.phase==='complete'&&/^F[A-Z0-9]+$/.test(checkpoint.uploads[f.id].fileId))continue;
+            await sender.uploadFile({team:s.team,owner:s.user,name:f.name,bytes:f.bytes},id=>{
+              checkpoint.uploads[f.id]={fileId:id,phase:'allocated'};input.saveCheckpoint?.(checkpoint);
+            });
+            checkpoint.uploads[f.id].phase='uploaded';input.saveCheckpoint?.(checkpoint);
+          }
+          const waiting=support.filter(f=>checkpoint.uploads[f.id].phase==='uploaded');
+          if(waiting.length){
+            try {await sender.completeFile({team:s.team,owner:s.user,files:waiting.map(f=>({id:checkpoint.uploads[f.id].fileId,title:f.name}))});}
+            catch(error){
+              // A later attempt uploads these files again with new tickets. A private file is never shared.
+              for(const f of waiting)checkpoint.uploads[f.id].phase='allocated';
+              input.saveCheckpoint?.(checkpoint);
+              if(error instanceof DesktopUnavailableError)throw notReady();
+              throw error;
+            }
+            for(const f of waiting)checkpoint.uploads[f.id].phase='complete';
             input.saveCheckpoint?.(checkpoint);
           }
-          if(error instanceof DesktopUnavailableError)throw notReady();
+          if(this.disabled||this.binding?.team!==s.team||this.binding?.user!==s.user)
+            throw new TransportError('The Slack app account changed before posting.',true);
+          checkpoint.postTransport='desktop';
+          try {
+            const receipt=await sender.post({team:s.team,owner:s.user,to:input.to,channel,messageId:input.messageId,text,blocks,
+              ...(input.threadTs?{threadTs:input.threadTs}:{})},()=>{checkpoint.postStarted=true;input.saveCheckpoint?.(checkpoint);});
+            if(receipt.channel!==channel)throw new TransportError('Slack posted the note in another conversation.',false);
+            ts=receipt.ts;checkpoint.postedTs=ts;input.saveCheckpoint?.(checkpoint);
+          }catch(error){
+            if(error instanceof TransportError&&error.definite&&checkpoint.postStarted){checkpoint.postStarted=false;input.saveCheckpoint?.(checkpoint);}
+            if(error instanceof DesktopUnavailableError)throw notReady();
+            throw error;
+          }
+        }
+        // The note is posted once. Later attempts only attach the saved files to the same message.
+        try {
+          await sender.attachFiles({team:s.team,owner:s.user,channel,ts,messageId:input.messageId,text,blocks,
+            files:support.map(f=>({id:checkpoint.uploads[f.id].fileId,title:f.name}))});
+        }catch(error){
+          if(error instanceof DesktopUnavailableError)
+            throw new TransportError('Slack Desktop is not ready to attach the files. The posted note waits for them.',true,10,'slack.desktop');
           throw error;
         }
-        for(const f of support)checkpoint.uploads[f.id].phase='complete';input.saveCheckpoint?.(checkpoint);
         for(let attempt=0;attempt<10;attempt++){
-          await app.navigate(channel);
+          await app.message(channel,ts);
           const latest=await app.snapshot();
-          const m=latest.messages.find(m=>m.channel===channel&&m.user===s.user&&this.messageId(m.text)===input.messageId&&
+          const m=latest.messages.find(m=>m.channel===channel&&m.ts===ts&&m.user===s.user&&
             support.every(f=>m.files?.some(found=>found.id===checkpoint.uploads[f.id].fileId&&found.name===f.name&&found.size===f.bytes.length)));
-          if(m)return {channel,ts:m.ts,files};
+          if(m)return {channel,ts,files};
           await new Promise(resolve=>setTimeout(resolve,300));
         }
-        throw new TransportError('Slack has not confirmed the file share message. No duplicate was posted.',false);
+        throw new TransportError('Slack has not shown the attached files yet. The note will not be posted again.',false);
       }
       checkpoint.postTransport='desktop';
       try {
@@ -266,8 +285,10 @@ export class SlackTransport implements Transport {
       const receipt = new DesktopDeliveries(dirname(this.file)).receipt(snapshot.team,snapshot.user,to,id);
       if (receipt && !(progress?.expectedFiles?.length)) return receipt;
       const s = await this.view(app, user), m = s.messages.find(m => m.channel === s.channel && m.user === s.user && (m.client_msg_id === id || this.messageId(m.text) === id));
-      if (!m || !(progress?.expectedFiles||[]).every(f=>m.files?.some(found=>found.name===f.name&&found.size===f.size)))
-        throw new TransportError('The app has not shown the earlier message and all its files. No duplicate was posted.', false);
+      if (!m) throw new TransportError('The app has not shown the earlier message. No duplicate was posted.', false);
+      // A posted note without its files gets them attached on the next attempt. The note is never posted again.
+      if (!(progress?.expectedFiles||[]).every(f=>m.files?.some(found=>found.name===f.name&&found.size===f.size)))
+        return {channel: m.channel, ts: m.ts, filesMissing: true};
       return {channel: m.channel, ts: m.ts};
     });
   }
