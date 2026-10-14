@@ -68,6 +68,8 @@ export class SlackTransport implements Transport {
           const c = {team: s.team, user: s.user, name: s.people.find(p => p.id === s.user)?.name || s.user};
           savePrivate(this.file, c); this.binding = c;
         }
+        const name = s.people.find(p => p.id === s.user && p.active)?.name;
+        if (name && name !== this.binding.name) {this.binding.name=name;savePrivate(this.file,this.binding);}
         this.verified = true; checked = true; this.cache = s;
         return await action(app, s);
       } catch (error) {
@@ -85,16 +87,23 @@ export class SlackTransport implements Transport {
   async refresh() {if (!this.disabled) await this.run(async () => {});}
   disconnect() {this.generation++; this.disabled = true; this.verified = false; this.binding = undefined; this.cache = undefined; savePrivate(this.file, {disabled:true});}
   private async wait(app: AppConnection, check: (s: AppSnapshot) => boolean) {
-    for (const until = Date.now() + 5000; Date.now() < until; await new Promise(r => setTimeout(r, 100))) {
-      const s = await app.snapshot();
+    for (const until = Date.now() + 20_000; Date.now() < until; await new Promise(r => setTimeout(r, 100))) {
+      let s: AppSnapshot;
+      try {s=await app.snapshot();} catch(error) {
+        if(error instanceof TransportError && !error.definite && error.method === 'slack.desktop') continue;
+        throw error;
+      }
       if (s.team !== this.binding?.team || s.user !== this.binding?.user || this.disabled) throw new TransportError('The Slack app account changed.', true);
       this.cache = s; if (check(s)) return s;
     }
     throw new TransportError('The Slack app did not confirm the expected message view.', false);
   }
   private async view(app: AppConnection, id: string) {
-    await app.navigate(id);
-    return this.wait(app, s => !!s.channel && s.peers.some(p => p.id === s.channel && (p.user === id || p.id === id)));
+    const current=await app.snapshot();
+    const peer=current.peers.find(p=>p.id===id || p.user===id);
+    if (!peer) throw new TransportError('Open the direct conversation in Slack so the app can verify its recipient.', true);
+    if(current.channel!==peer.id) await app.navigate(peer.id);
+    return this.wait(app, s => s.channel===peer.id && s.peers.some(p=>p.id===peer.id && p.user===peer.user));
   }
   private person(s: AppSnapshot, user: string): Person {
     const p = s.people.find(p => p.id === user);

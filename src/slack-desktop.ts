@@ -272,6 +272,10 @@ export class SlackDesktopHook {
     };
     socket.on('message', (raw: RawData) => {
       let m: any; try { m = JSON.parse(raw.toString()); } catch { return; }
+      if (m.method === 'Runtime.executionContextsCleared') {
+        this.nativeTargets.delete(target.id);this.rendererGlobals.delete(target.id);this.verifiedTargets.delete(target.id);
+        verified=false;trusted.clear();socket.close();this.state();return;
+      }
       const pending = this.requests.get(m.id);
       if (pending?.socket === socket) {
         clearTimeout(pending.timer);this.requests.delete(m.id);
@@ -307,6 +311,7 @@ export class SlackDesktopHook {
     await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); socket.once('close', () => reject(new Error('Desktop connection closed.'))); });
     if (this.stopped) { socket.terminate(); return; }
     socket.send(JSON.stringify({ id: ++this.sequence, method: 'Network.enable', params: {} }));
+    if(this.options.config.send) socket.send(JSON.stringify({id:++this.sequence,method:'Runtime.enable',params:{}}));
     identityCheck();
   }
   private async drain() {

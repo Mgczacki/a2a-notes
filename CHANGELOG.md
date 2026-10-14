@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.1
+
+- Read verified member names from current Slack avatar records.
+- Navigate to the verified direct conversation instead of a member profile URL.
+- Wait for account loading while still rejecting a confirmed account change.
+- Reconnect native posting after Slack clears the renderer context.
+
 ## 0.11.0
 
 - Combine the app-only transport with optional native SDK posting.

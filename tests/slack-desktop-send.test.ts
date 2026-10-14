@@ -153,8 +153,20 @@ async function nativeCDP(t:any,onPost:(p:DesktopPost,client:WebSocket)=>Promise<
   });
   await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));port=(server.address() as any).port;
   t.after(async()=>{for(const c of clients)c.terminate();await new Promise<void>(r=>ws.close(()=>server.close(()=>r())));});
-  return {url:`http://127.0.0.1:${port}`,posts};
+  return {url:`http://127.0.0.1:${port}`,posts,clients};
 }
+
+test('a cleared renderer context reconnects and verifies native capability before another post',async t=>{
+  const remote=await nativeCDP(t,async p=>({ok:true,channel:p.channel,ts:'100.0002'}));
+  let verified=0;
+  const hook=new SlackDesktopHook({dir:mkdtempSync(join(tmpdir(),'native-context-')),config:{url:remote.url,send:true},
+    identity:()=>({transport:'slack',address:`slack:TEXAMPLE:${MARIO}`,name:'Mario',scopes:[],missingScopes:[],optionalMissing:[]}),
+    verifyEndpoint:async()=>{verified++;},verifyChannel:async()=>false,receive:async()=>{}});
+  t.after(()=>hook.close());hook.start();await wait(()=>hook.canSend());
+  const old=[...remote.clients][0];old.send(JSON.stringify({method:'Runtime.executionContextsCleared'}));
+  await wait(()=>!hook.canSend());await wait(()=>hook.canSend());assert.ok(verified>=3);
+  assert.equal((await hook.post(input(),()=>{})).ts,'100.0002');assert.equal(remote.posts.length,1);
+});
 
 test('the CDP send records 429 and its workspace wait across restart before another native call', async t=>{
   const dir=mkdtempSync(join(tmpdir(),'native-cdp-429-'));let mode='429';

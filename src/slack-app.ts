@@ -26,12 +26,17 @@ export function rendererSnapshot() {
     people.set(u.id, {id: u.id, name: String(p.display_name || u.real_name || u.name || u.id),
       realName: String(u.real_name || p.real_name || ''), title: String(p.title || ''), active: !u.deleted && !u.is_bot && !u.is_app_user});
   }
-  function props(element: any, visit: (p: any) => void) {
+  function props(element: any, visit: (p: any, component?: string) => void) {
     let f = element[Object.keys(element).find(k => k.startsWith('__reactFiber')) || ''];
-    for (let i = 0; f && i < 30; i++, f = f.return) if (f.memoizedProps) visit(f.memoizedProps);
+    for (let i = 0; f && i < 30; i++, f = f.return) if (f.memoizedProps) visit(f.memoizedProps, f.type?.displayName || f.type?.name);
   }
-  for (const element of [...document.querySelectorAll('[data-qa], [data-user-id]')].slice(0, 5000)) props(element, p => {
+  for (const element of [...document.querySelectorAll('[data-qa], [data-user-id]')].slice(0, 5000)) props(element, (p, component) => {
     person(p.user); person(p.member); person(p.currentUser); person(p.recipient);
+    if (component === 'BaseAvatar' && /^[UW][A-Z0-9]+$/.test(p.userId) && typeof p.memberOrBotName === 'string' &&
+        typeof p.isDeleted === 'boolean' && typeof p.userType === 'string') {
+      people.set(p.userId, {id:p.userId, name:p.memberOrBotName, realName:p.memberOrBotName, title:'',
+        active:p.userType === 'member' && !p.isDeleted && !p.botId && p.hasNoAccess !== true});
+    }
     const c = p.channel || p.conversation;
     if (c && /^D[A-Z0-9]+$/.test(c.id) && c.is_im === true && /^[UW][A-Z0-9]+$/.test(c.user)) peers.set(c.id, {id: c.id, user: c.user});
   });
@@ -164,8 +169,10 @@ export class SlackAppConnection implements AppConnection {
   private async evaluate(expression: string) {return (await this.request('Runtime.evaluate', {expression, returnByValue: true})).result?.value;}
   private async account() {
     const found = await this.evaluate(DESKTOP_IDENTITY);
-    if (found?.team !== this.team || !/^[UW][A-Z0-9]+$/.test(found?.user) || this.user && found.user !== this.user)
+    if (found?.team && found.team !== this.team || /^[UW][A-Z0-9]+$/.test(found?.user) && this.user && found.user !== this.user)
       throw new TransportError('The Slack app account differs from the saved account. No action was taken.', true);
+    if (found?.team !== this.team || !/^[UW][A-Z0-9]+$/.test(found?.user))
+      throw new TransportError('The Slack app account is still loading.', false, 1, 'slack.desktop');
     this.user ||= found.user;
     return found;
   }

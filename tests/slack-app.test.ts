@@ -92,6 +92,30 @@ test('API upload progress cannot become a second attachment through the app adap
   assert.equal(native,0);assert.deepEqual(f.calls,[]);
 });
 
+test('recipient lookup uses its verified DM and waits for the account after navigation', async () => {
+  const f=fixture();await f.transport.connect();f.s.channel=undefined;let loading=0;
+  f.app.navigate=async id=>{assert.equal(id,'DOTHER01');f.calls.push('navigate:'+id);f.s.channel=id;loading=2;};
+  f.app.snapshot=async()=>{if(loading-->0)throw new TransportError('The Slack app account is still loading.',false,1,'slack.desktop');return structuredClone(f.s);};
+  const recipient=await f.transport.checkRecipient('slack:TEXAMPLE:UALEX01');
+  assert.equal(recipient.name,'Alex');assert.deepEqual(f.calls,['navigate:DOTHER01']);
+  await assert.rejects(f.transport.checkRecipient('slack:TEXAMPLE:UNEW01'),/verify its recipient/);
+});
+
+test('live avatar fields provide verified names and exclude deleted or automated users', () => {
+  const avatar=(id:string,type:string,deleted=false)=>({__reactFiberTest:{type:{displayName:'BaseAvatar'},memoizedProps:{userId:id,memberOrBotName:'Member '+id,userType:type,isDeleted:deleted,access:'private'}}});
+  const elements=[avatar('UALEX01','member'),avatar('UMARIO01','member'),avatar('UBOT01','bot'),avatar('UDELETED01','member',true)];
+  const result=runInNewContext(`(${rendererSnapshot.toString()})()`,{__name:(f:unknown)=>f,location:{pathname:'/client/TEXAMPLE/DOTHER01'},document:{querySelector:()=>null,querySelectorAll:(q:string)=>q.includes('contenteditable')?[]:elements}});
+  assert.equal(result.people.find((p:any)=>p.id==='UALEX01').active,true);
+  assert.equal(result.people.find((p:any)=>p.id==='UBOT01').active,false);
+  assert.equal(result.people.find((p:any)=>p.id==='UDELETED01').active,false);
+  assert.ok(!JSON.stringify(result).includes('private'));
+});
+
+test('refresh updates the name without changing the bound sender', async () => {
+  const f=fixture();await f.transport.connect();f.s.people[0].name='Mario G';await f.transport.refresh();
+  assert.equal(f.transport.identity()?.name,'Mario G');assert.equal(f.transport.identity()?.address,'slack:TEXAMPLE:UMARIO01');
+});
+
 test('app connection binds account IDs without reading an OAuth credential file', async () => {
   const f=fixture(); assert.equal(f.transport.identity(),null);
   writeFileSync(join(f.file,'..','slack-credentials.json'), 'not JSON and never read');

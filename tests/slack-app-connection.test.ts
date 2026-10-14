@@ -34,3 +34,9 @@ test('a changed app account blocks navigation before a page action',async t=>{
 test('a page from another workspace cannot become the app connection',async t=>{
   const f=await fixture(t);f.setTargetTeam('TOTHER01');await assert.rejects(SlackAppConnection.open(f.url,'TEXAMPLE',undefined,{verifyEndpoint:async()=>{}}),/configured workspace/);assert.equal(f.calls.length,0);
 });
+
+test('an account that is loading differs from a confirmed account change',async t=>{
+  const f=await fixture(t),app=await SlackAppConnection.open(f.url,'TEXAMPLE',undefined,{verifyEndpoint:async()=>{}});t.after(()=>app.close());
+  f.setUser('');await assert.rejects(app.snapshot(),(error:any)=>!error.definite&&error.method==='slack.desktop');
+  f.setUser('UEVE01');await assert.rejects(app.snapshot(),(error:any)=>error.definite&&/account differs/.test(error.message));
+});
